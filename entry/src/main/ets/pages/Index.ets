@@ -1,13 +1,22 @@
 // entry/src/main/ets/pages/Index.ets
 import { TabBarOptions } from '@kit.ArkUI';
+import http from '@ohos.net.http';
 
 // ====== 一些数据结构定义 ======
 interface StockIndex {
-  name: string;
   code: string;
+  name: string;
   price: number;
   change: number;
   changePercent: number;
+}
+
+interface BackendStockIndex {
+  code: string;
+  name: string;
+  price: number;
+  change: number;
+  change_percent: number;
 }
 
 interface StockQuote {
@@ -39,13 +48,12 @@ struct HarmonyStockPage {
   // 顶部 Tab：0 市场 1 自选 2 通知
   @State currentTabIndex: number = 0;
 
-  // 模拟一些数据（先做 UI，用假数据就行）
-  private marketIndices: StockIndex[] = [
-    { name: '上证指数', code: '000001', price: 3050.32, change: 12.34, changePercent: 0.41 },
-    { name: '深证成指', code: '399001', price: 9850.11, change: -23.56, changePercent: -0.24 },
-    { name: '创业板指', code: '399006', price: 2100.45, change: 5.78, changePercent: 0.28 }
-  ];
+  // ===== 指数数据：从后端拉取 =====
+  @State marketIndices: StockIndex[] = [];
+  @State indicesLoading: boolean = false;
+  @State indicesError: string = '';
 
+  // ===== 下面这些还是你原来的自选股 / 通知假数据，不动 =====
   private groups: StockGroup[] = [
     {
       id: 1,
@@ -84,6 +92,54 @@ struct HarmonyStockPage {
   // 当前 K 线周期：0 日K 1 周K 2 月K
   @State klinePeriodIndex: number = 0;
 
+  // ===== 页面生命周期：进来时拉一次指数 =====
+  aboutToAppear() {
+    this.fetchMarketIndices();
+  }
+
+  // ===== 向 FastAPI 后端请求指数数据 =====
+  private async fetchMarketIndices() {
+    this.indicesLoading = true;
+    this.indicesError = '';
+    const httpRequest = http.createHttp();
+
+    try {
+      // ⚠ 这里要写你电脑在局域网里的 IP
+      // 比如电脑 IP 是 192.168.0.101，则：
+      // const url = 'http://192.168.0.101:8000/api/indices/realtime';
+      // 先留一个占位，改成你自己的 IP
+      const url: string = 'http://192.168.0.101:8000/api/indices/realtime';
+
+      const res = await httpRequest.request(url, {
+        method: http.RequestMethod.GET,
+        connectTimeout: 5000,
+        readTimeout: 5000,
+      });
+
+      if (res.responseCode === 200 && res.result) {
+        const raw = JSON.parse(res.result as string) as BackendStockIndex[];
+
+        this.marketIndices = raw.map((it: BackendStockIndex) => {
+          const item: StockIndex = {
+            code: it.code,
+            name: it.name,
+            price: it.price,
+            change: it.change,
+            changePercent: it.change_percent,
+          };
+          return item;
+        });
+
+      } else {
+        this.indicesError = `HTTP ${res.responseCode}`;
+      }
+    } catch (err) {
+      this.indicesError = `${err}`;
+    } finally {
+      httpRequest.destroy();
+      this.indicesLoading = false;
+    }
+  }
 
   // 自定义 TabBar：这里就能完全控制文字颜色
   @Builder tabBarBuilder(title: string, index: number) {
@@ -100,10 +156,10 @@ struct HarmonyStockPage {
 
   build() {
     Column() {
-      // 顶部标题栏（你原来的就行）
+      // 顶部标题栏
       this.buildHeader()
 
-      // ===== 关键：Tabs 部分 =====
+      // ===== Tabs 部分 =====
       Tabs({ index: this.currentTabIndex }) {
         TabContent() {
           this.buildMarketTab()
@@ -127,7 +183,6 @@ struct HarmonyStockPage {
         color: '#333333'
       })
       .onChange((index: number) => {
-        // 选中的 tab 发生变化时，更新 currentTabIndex
         this.currentTabIndex = index
       })
     }
@@ -155,14 +210,6 @@ struct HarmonyStockPage {
       .padding({ left: 16, right: 16, top: 16, bottom: 8 })
       .justifyContent(FlexAlign.SpaceBetween)
       .alignItems(VerticalAlign.Center)
-
-      // Row() {
-      //   Text('实时行情 · 黑色主题')
-      //     .fontSize(12)
-      //     .fontColor('#888888')
-      // }
-      // .width('100%')
-      // .padding({ left: 16, right: 16, bottom: 8 })
     }
     .backgroundColor('#111111')
   }
@@ -185,16 +232,38 @@ struct HarmonyStockPage {
     .backgroundColor(Color.Black)
   }
 
+  // ===== 指数横向 strip，带加载/错误状态 =====
   @Builder
   private buildIndexStrip() {
-    Scroll() {
-      Row({ space: 12 }) {
-        ForEach(this.marketIndices, (item: StockIndex) => {
-          this.buildIndexCard(item);
-        }, (item: StockIndex) => item.code)
+    if (this.indicesLoading) {
+      // 加载中
+      Row() {
+        Text('指数加载中…')
+          .fontSize(12)
+          .fontColor('#888888')
       }
+      .width('100%')
       .padding({ left: 16, right: 16, top: 12, bottom: 12 })
-    }.scrollable(ScrollDirection.Horizontal)
+    } else if (this.indicesError) {
+      // 加载失败
+      Row() {
+        Text(`指数加载失败：${this.indicesError}`)
+          .fontSize(12)
+          .fontColor('#FF7875')
+      }
+      .width('100%')
+      .padding({ left: 16, right: 16, top: 12, bottom: 12 })
+    } else {
+      // 正常数据
+      Scroll() {
+        Row({ space: 12 }) {
+          ForEach(this.marketIndices, (item: StockIndex) => {
+            this.buildIndexCard(item);
+          }, (item: StockIndex) => item.code)
+        }
+        .padding({ left: 16, right: 16, top: 12, bottom: 12 })
+      }.scrollable(ScrollDirection.Horizontal)
+    }
   }
 
   @Builder
@@ -221,7 +290,6 @@ struct HarmonyStockPage {
     .width(140)
   }
 
-
   @Builder
   private buildKlineCard() {
     Column() {
@@ -241,34 +309,19 @@ struct HarmonyStockPage {
       .width('100%')
       .padding({ left: 16, right: 16, top: 8 })
 
-      // K 线图占位区域（先做 UI，占位即可）
+      // K 线图占位区域
       Column() {
         Text('K 线图区域（UI 占位）')
           .fontSize(12)
           .fontColor('#666666')
           .margin({ bottom: 8 })
 
-        // 用几个简单的矩形模拟 K 线视感
         Row({ space: 6 }) {
           ForEach([1, 2, 3, 4, 5, 6, 7], (id: number) => {
             Column() {
-              // 上影线
-              Rect()
-                .width(2)
-                .height(40)
-                .fill('#444444')
-
-              // 实体
-              Rect()
-                .width(8)
-                .height(24)
-                .fill(id % 2 === 0 ? '#39D98A' : '#FF4D4F')
-
-              // 下影线
-              Rect()
-                .width(2)
-                .height(40)
-                .fill('#444444')
+              Rect().width(2).height(40).fill('#444444')
+              Rect().width(8).height(24).fill(id % 2 === 0 ? '#39D98A' : '#FF4D4F')
+              Rect().width(2).height(40).fill('#444444')
             }
           }, (id: number) => id.toString())
         }
@@ -295,7 +348,6 @@ struct HarmonyStockPage {
       })
   }
 
-
   @Builder
   private buildDesktopCardPreview() {
     Column() {
@@ -311,7 +363,6 @@ struct HarmonyStockPage {
       .width('100%')
       .padding({ left: 16, right: 16, bottom: 8 })
 
-      // 预览卡片
       Row({ space: 12 }) {
         Column() {
           this.buildDesktopCardSmall();
@@ -372,7 +423,6 @@ struct HarmonyStockPage {
         .fontColor('#FF7875')
         .margin({ top: 2 })
 
-      // 底部简单条形走势
       Row({ space: 2 }) {
         ForEach([16, 10, 18, 8, 20, 12, 14], (h: number, idx: number) => {
           Rect()
@@ -393,7 +443,6 @@ struct HarmonyStockPage {
   @Builder
   private buildWatchlistTab() {
     Column() {
-      // 分组横向选择条
       Scroll() {
         Row({ space: 8 }) {
           ForEach(this.groups, (group: StockGroup) => {
@@ -410,7 +459,6 @@ struct HarmonyStockPage {
         .padding({ left: 16, right: 16, top: 12, bottom: 8 })
       }.scrollable(ScrollDirection.Horizontal)
 
-      // 组内列表（这里只展示第一个组）
       if (this.groups.length > 0) {
         Column() {
           Row() {
@@ -431,7 +479,7 @@ struct HarmonyStockPage {
             }, (s: StockQuote) => s.code)
           }
         }
-    } else {
+      } else {
         Column() {
           Text('暂无自选分组')
             .fontSize(12)
@@ -479,7 +527,6 @@ struct HarmonyStockPage {
     }
     .margin({ bottom: 1 })
   }
-
 
   // ====== Tab 3：行情通知中心（只是 UI 列表） ======
   @Builder
