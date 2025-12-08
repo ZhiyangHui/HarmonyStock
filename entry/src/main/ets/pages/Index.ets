@@ -98,17 +98,13 @@ struct HarmonyStockPage {
   }
 
   // ===== 向 FastAPI 后端请求指数数据 =====
-  private async fetchMarketIndices() {
+  async fetchMarketIndices() {
     this.indicesLoading = true;
     this.indicesError = '';
-    const httpRequest = http.createHttp();
 
+    const httpRequest = http.createHttp();
     try {
-      // ⚠ 这里要写你电脑在局域网里的 IP
-      // 比如电脑 IP 是 192.168.0.101，则：
-      // const url = 'http://192.168.0.101:8000/api/indices/realtime';
-      // 先留一个占位，改成你自己的 IP
-      const url: string = 'http://192.168.0.101:8000/api/indices/realtime';
+      const url = 'http://101.43.185.73:8000/api/indices/realtime';
 
       const res = await httpRequest.request(url, {
         method: http.RequestMethod.GET,
@@ -119,7 +115,7 @@ struct HarmonyStockPage {
       if (res.responseCode === 200 && res.result) {
         const raw = JSON.parse(res.result as string) as BackendStockIndex[];
 
-        this.marketIndices = raw.map((it: BackendStockIndex) => {
+        this.marketIndices = raw.map((it: BackendStockIndex): StockIndex => {
           const item: StockIndex = {
             code: it.code,
             name: it.name,
@@ -129,17 +125,18 @@ struct HarmonyStockPage {
           };
           return item;
         });
-
       } else {
         this.indicesError = `HTTP ${res.responseCode}`;
       }
-    } catch (err) {
-      this.indicesError = `${err}`;
+    } catch (e) {
+      this.indicesError = `${e}`;
     } finally {
       httpRequest.destroy();
       this.indicesLoading = false;
     }
   }
+
+
 
   // 自定义 TabBar：这里就能完全控制文字颜色
   @Builder tabBarBuilder(title: string, index: number) {
