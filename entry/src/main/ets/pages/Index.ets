@@ -53,6 +53,15 @@ struct HarmonyStockPage {
   @State indicesLoading: boolean = false;
   @State indicesError: string = '';
 
+  // ===== 指数代码查询相关状态 =====
+  @State indexSearchCode: string = ''        // 输入框内容
+  @State indexSearchLoading: boolean = false // 查询中
+  @State indexSearchError: string = ''       // 查询错误
+  @State searchedIndices: StockIndex[] = []  // ✅ 所有搜索出来的指数
+
+  // 当前 K 线周期：0 日K 1 周K 2 月K
+  @State klinePeriodIndex: number = 0;
+
   // ===== 下面这些还是你原来的自选股 / 通知假数据，不动 =====
   private groups: StockGroup[] = [
     {
@@ -89,16 +98,81 @@ struct HarmonyStockPage {
     }
   ];
 
-  // 当前 K 线周期：0 日K 1 周K 2 月K
-  @State klinePeriodIndex: number = 0;
+
 
   // ===== 页面生命周期：进来时拉一次指数 =====
   aboutToAppear() {
     this.fetchMarketIndices();
   }
 
+  // ===== 根据代码查询单个指数 =====
+  private async queryIndexByCode() {
+    const code: string = this.indexSearchCode;
+
+    if (!code || code.length !== 6) {
+      this.indexSearchError = '请输入 6 位指数代码';
+      return;
+    }
+
+    this.indexSearchLoading = true;
+    this.indexSearchError = '';
+
+    const httpRequest = http.createHttp();
+    try {
+      const url = `http://101.43.185.73:8000/api/index/by_code?code=${code}`;
+
+      const res = await httpRequest.request(url, {
+        method: http.RequestMethod.GET,
+        connectTimeout: 5000,
+        readTimeout: 5000,
+      });
+
+      if (res.responseCode === 200 && res.result) {
+        const backendItem: BackendStockIndex =
+          JSON.parse(res.result as string) as BackendStockIndex;
+
+        const newItem: StockIndex = {
+          code: backendItem.code,
+          name: backendItem.name,
+          price: backendItem.price,
+          change: backendItem.change,
+          changePercent: backendItem.change_percent,
+        };
+
+        // 1）先看 strip 里是否已经有这个 code（避免重复）
+        const existsInSearched: boolean = this.searchedIndices.some(
+          (it: StockIndex) => it.code === newItem.code
+        );
+        const existsInMarket: boolean = this.marketIndices.some(
+          (it: StockIndex) => it.code === newItem.code
+        );
+
+        if (!existsInSearched && !existsInMarket) {
+          // 2）插到 searchedIndices 的开头
+          const copy: StockIndex[] = [newItem];
+          for (let i = 0; i < this.searchedIndices.length; i++) {
+            copy.push(this.searchedIndices[i]);
+          }
+          this.searchedIndices = copy;
+        }
+      } else if (res.responseCode === 404) {
+        this.indexSearchError = '未找到该指数代码';
+      } else {
+        this.indexSearchError = `HTTP ${res.responseCode}`;
+      }
+    } catch (e) {
+      this.indexSearchError = `${e}`;
+    } finally {
+      httpRequest.destroy();
+      this.indexSearchLoading = false;
+    }
+  }
+
+
+
   // ===== 向 FastAPI 后端请求指数数据 =====
   async fetchMarketIndices() {
+    // ✅ 用和 UI 一致的状态
     this.indicesLoading = true;
     this.indicesError = '';
 
@@ -112,28 +186,47 @@ struct HarmonyStockPage {
         readTimeout: 5000,
       });
 
+      console.info('== indices http response ==', JSON.stringify(res));
+
       if (res.responseCode === 200 && res.result) {
         const raw = JSON.parse(res.result as string) as BackendStockIndex[];
+        console.info('== indices parsed ==', JSON.stringify(raw));
 
         this.marketIndices = raw.map((it: BackendStockIndex): StockIndex => {
-          const item: StockIndex = {
+          return {
             code: it.code,
             name: it.name,
             price: it.price,
             change: it.change,
             changePercent: it.change_percent,
           };
-          return item;
         });
+
+        console.info('== indices mapped ==', JSON.stringify(this.marketIndices));
       } else {
         this.indicesError = `HTTP ${res.responseCode}`;
       }
     } catch (e) {
-      this.indicesError = `${e}`;
+      // 这里之前你直接 `${e}`，很多时候就是 [Object object]
+      console.error('== indices http error ==', JSON.stringify(e));
+      this.indicesError = JSON.stringify(e); // 直接转成字符串
     } finally {
       httpRequest.destroy();
       this.indicesLoading = false;
     }
+  }
+
+  private getIndexStripList(): StockIndex[] {
+    const result: StockIndex[] = [];
+    // 先把查出来的放前面
+    for (let i = 0; i < this.searchedIndices.length; i++) {
+      result.push(this.searchedIndices[i]);
+    }
+    // 再把原始指数列表放后面
+    for (let j = 0; j < this.marketIndices.length; j++) {
+      result.push(this.marketIndices[j]);
+    }
+    return result;
   }
 
 
@@ -215,6 +308,9 @@ struct HarmonyStockPage {
   @Builder
   private buildMarketTab() {
     Column() {
+      // ★ 新增：指数代码查询区域
+      this.buildIndexSearchArea();
+
       // 指数横向滚动
       this.buildIndexStrip();
 
@@ -223,17 +319,20 @@ struct HarmonyStockPage {
 
       // 桌面行情卡片预览
       this.buildDesktopCardPreview();
+
     }
     .width('100%')
     .height('100%')
     .backgroundColor(Color.Black)
   }
 
+
+
+
   // ===== 指数横向 strip，带加载/错误状态 =====
   @Builder
   private buildIndexStrip() {
     if (this.indicesLoading) {
-      // 加载中
       Row() {
         Text('指数加载中…')
           .fontSize(12)
@@ -242,7 +341,6 @@ struct HarmonyStockPage {
       .width('100%')
       .padding({ left: 16, right: 16, top: 12, bottom: 12 })
     } else if (this.indicesError) {
-      // 加载失败
       Row() {
         Text(`指数加载失败：${this.indicesError}`)
           .fontSize(12)
@@ -251,17 +349,75 @@ struct HarmonyStockPage {
       .width('100%')
       .padding({ left: 16, right: 16, top: 12, bottom: 12 })
     } else {
-      // 正常数据
+      // ✅ 正常数据：把“搜索结果 + 原有指数”渲染在一行里
       Scroll() {
         Row({ space: 12 }) {
-          ForEach(this.marketIndices, (item: StockIndex) => {
+          ForEach(this.getIndexStripList(), (item: StockIndex) => {
             this.buildIndexCard(item);
           }, (item: StockIndex) => item.code)
         }
         .padding({ left: 16, right: 16, top: 12, bottom: 12 })
-      }.scrollable(ScrollDirection.Horizontal)
+      }
+      .scrollable(ScrollDirection.Horizontal)
     }
   }
+
+
+
+
+
+  // ===== 指数代码查询区域（输入 + 结果展示） =====
+  @Builder
+  private buildIndexSearchArea() {
+    Column() {
+      // 上：输入 + 按钮
+      Row({ space: 8 }) {
+        TextInput({ placeholder: '输入指数代码，例如 000001' })
+          .width('60%')
+          .height(32)
+          .fontSize(14)
+          .backgroundColor(Color.White)  // ✅ 白色输入框
+          .fontColor(Color.Black)
+          .onChange((value: string) => {
+            this.indexSearchCode = value.trim();
+          })
+
+        Button('查询')
+          .height(32)
+          .onClick(() => {
+            this.queryIndexByCode();
+          })
+      }
+      .padding({ left: 16, right: 16, top: 8, bottom: 4 })
+
+      // 下：状态提示
+      if (this.indexSearchLoading) {
+        Row() {
+          Text('正在查询指数…')
+            .fontSize(12)
+            .fontColor('#888888')
+        }
+        .width('100%')
+        .padding({ left: 16, right: 16, bottom: 8 })
+      } else if (this.indexSearchError) {
+        Row() {
+          Text(`查询失败：${this.indexSearchError}`)
+            .fontSize(12)
+            .fontColor('#FF7875')
+        }
+        .width('100%')
+        .padding({ left: 16, right: 16, bottom: 8 })
+      }
+    }
+  }
+
+
+
+
+
+
+
+
 
   @Builder
   private buildIndexCard(item: StockIndex) {
