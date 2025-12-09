@@ -119,6 +119,14 @@ struct HarmonyStockPage {
   @State klineMaxPrice: number = 0;
   @State klineXLabels: string[] = [];  // 三个日期标签
 
+  // ⭐ 当前选中的 K 线（用于显示详细数据 + 高亮）
+  @State selectedKlineIndex: number = -1;
+  @State selectedKlineDate: string = '';
+  @State selectedKlineOpen: number = 0;
+  @State selectedKlineHigh: number = 0;
+  @State selectedKlineLow: number = 0;
+  @State selectedKlineClose: number = 0;
+
   // ===== 下面这些还是你原来的自选股 / 通知假数据，不动 =====
   private groups: StockGroup[] = [
     {
@@ -419,6 +427,14 @@ struct HarmonyStockPage {
 
         // ⭐ 所有几何计算都在这里一次性完成
         this.recomputeKlineGeom();
+
+        // ⭐ 默认选中最后一根（最新一根）
+        if (raw.length > 0) {
+          this.onKlineSelected(raw.length - 1);
+        } else {
+          this.selectedKlineIndex = -1;
+        }
+
       } else {
         this.klineError = `HTTP ${res.responseCode}`;
         this.klinePoints = [];
@@ -434,6 +450,22 @@ struct HarmonyStockPage {
       httpRequest.destroy();
       this.klineLoading = false;
     }
+  }
+
+
+  private onKlineSelected(index: number): void {
+    if (index < 0 || index >= this.klinePoints.length) {
+      return;
+    }
+
+    const pt: IndexKlinePoint = this.klinePoints[index];
+
+    this.selectedKlineIndex = index;
+    this.selectedKlineDate = pt.date;
+    this.selectedKlineOpen = pt.open;
+    this.selectedKlineHigh = pt.high;
+    this.selectedKlineLow = pt.low;
+    this.selectedKlineClose = pt.close;
   }
 
 
@@ -707,6 +739,34 @@ struct HarmonyStockPage {
       .width('100%')
       .padding({ left: 16, right: 16, top: 8 })
 
+      // ⭐ 当前选中 K 线的详细信息条
+      if (this.selectedKlineIndex >= 0) {
+        Row({ space: 8 }) {
+          Text(this.selectedKlineDate)
+            .fontSize(10)
+            .fontColor('#CCCCCC')
+
+          Text(`开 ${this.selectedKlineOpen.toFixed(2)}`)
+            .fontSize(10)
+            .fontColor('#AAAAAA')
+
+          Text(`高 ${this.selectedKlineHigh.toFixed(2)}`)
+            .fontSize(10)
+            .fontColor('#AAAAAA')
+
+          Text(`低 ${this.selectedKlineLow.toFixed(2)}`)
+            .fontSize(10)
+            .fontColor('#AAAAAA')
+
+          Text(`收 ${this.selectedKlineClose.toFixed(2)}`)
+            .fontSize(10)
+            .fontColor('#AAAAAA')
+        }
+        .width('100%')
+        .padding({ left: 16, right: 16, top: 4, bottom: 4 })
+      }
+
+
       // 主体区域
       Column() {
         if (this.klineLoading) {
@@ -769,6 +829,15 @@ struct HarmonyStockPage {
                       // 底部补一点空白
                       Blank().height(4)
                     }
+                    // ⭐ 高亮当前选中的那一根
+                    .border({
+                      width: this.selectedKlineIndex === idx ? 1 : 0,
+                      color: this.selectedKlineIndex === idx ? '#FACC15' : '#000000'
+                    })
+                    // ⭐ 点哪根选哪根
+                    .onClick(() => {
+                      this.onKlineSelected(idx);
+                    })
                   }, (g: IndexKlineGeom, idx: number) => `${idx}`)
                 }
               }
