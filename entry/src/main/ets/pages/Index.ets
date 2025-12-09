@@ -168,6 +168,14 @@ struct HarmonyStockPage {
     }
   }
 
+  // 删除某个指数卡片（同时从搜索结果和原始指数里删）
+  private removeIndexCard(code: string) {
+    // 删搜索出来的那几张卡片
+    this.searchedIndices = this.searchedIndices.filter((item: StockIndex) => item.code !== code);
+    // 如果你也想从原始列表中一起删，就保留下面这行；
+    // 如果只想删“前面搜索出来的卡片”，可以把下面这一行删掉
+    this.marketIndices = this.marketIndices.filter((item: StockIndex) => item.code !== code);
+  }
 
 
   // ===== 向 FastAPI 后端请求指数数据 =====
@@ -327,9 +335,9 @@ struct HarmonyStockPage {
   }
 
 
-
-
   // ===== 指数横向 strip，带加载/错误状态 =====
+  @Builder
+  // ===== 指数横向 strip，带加载/错误状态 + 可删除的搜索卡片 =====
   @Builder
   private buildIndexStrip() {
     if (this.indicesLoading) {
@@ -349,20 +357,24 @@ struct HarmonyStockPage {
       .width('100%')
       .padding({ left: 16, right: 16, top: 12, bottom: 12 })
     } else {
-      // ✅ 正常数据：把“搜索结果 + 原有指数”渲染在一行里
+      // ✅ 正常数据：先渲染“搜索结果卡片”，再渲染“后台实时卡片”
       Scroll() {
         Row({ space: 12 }) {
-          ForEach(this.getIndexStripList(), (item: StockIndex) => {
+          // 搜索出来的卡片
+          ForEach(this.searchedIndices, (item: StockIndex) => {
             this.buildIndexCard(item);
-          }, (item: StockIndex) => item.code)
+          }, (item: StockIndex) => `search-${item.code}`)
+
+          // 后端实时卡片
+          ForEach(this.marketIndices, (item: StockIndex) => {
+            this.buildIndexCard(item);
+          }, (item: StockIndex) => `rt-${item.code}`)
         }
         .padding({ left: 16, right: 16, top: 12, bottom: 12 })
       }
       .scrollable(ScrollDirection.Horizontal)
     }
   }
-
-
 
 
 
@@ -412,26 +424,35 @@ struct HarmonyStockPage {
   }
 
 
-
-
-
-
-
-
-
   @Builder
   private buildIndexCard(item: StockIndex) {
     Column() {
-      Text(item.name)
-        .fontSize(12)
-        .fontColor('#AAAAAA')
+      // 顶部一行：名称 + 右上角 X
+      Row() {
+        Text(item.name)
+          .fontSize(12)
+          .fontColor('#AAAAAA')
 
+        Text('✕')
+          .fontSize(12)
+          .fontColor('#777777')
+          .onClick(() => {
+            // 直接删掉这个 code 对应的卡片
+            this.removeIndexCard(item.code);
+          })
+      }
+      .width('100%')                             // ⭐ 拉满整行宽度
+      .justifyContent(FlexAlign.SpaceBetween)    // ⭐ 左右两端对齐
+      .alignItems(VerticalAlign.Center)
+
+      // 价格
       Text(item.price.toFixed(2))
         .fontSize(20)
         .fontWeight(FontWeight.Bold)
         .fontColor(item.change >= 0 ? '#FF4D4F' : '#39D98A')
         .margin({ top: 4 })
 
+      // 涨跌
       Text(`${item.change.toFixed(2)}  ${item.changePercent.toFixed(2)}%`)
         .fontSize(12)
         .fontColor(item.change >= 0 ? '#FF7875' : '#6BE49B')
@@ -442,6 +463,10 @@ struct HarmonyStockPage {
     .borderRadius(12)
     .width(140)
   }
+
+
+
+
 
   @Builder
   private buildKlineCard() {
