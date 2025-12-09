@@ -41,6 +41,35 @@ interface NotifyRule {
   enabled: boolean;
 }
 
+interface IndexKlinePoint {
+  date: string;
+  open: number;
+  high: number;
+  low: number;
+  close: number;
+  volume: number;
+}
+
+
+interface KLinePoint {
+  date: string;
+  open: number;
+  high: number;
+  low: number;
+  close: number;
+  volume: number;
+}
+
+interface BackendKLinePoint {
+  date: string;
+  open: number;
+  high: number;
+  low: number;
+  close: number;
+  volume: number;
+}
+
+
 // ====== 页面组件 ======
 @Entry
 @Component
@@ -61,6 +90,19 @@ struct HarmonyStockPage {
 
   // 当前 K 线周期：0 日K 1 周K 2 月K
   @State klinePeriodIndex: number = 0;
+
+  // 当前选中的指数，用来切换 K 线
+  @State selectedIndexCode: string = '';
+  @State selectedIndexName: string = '';
+
+  // 指数 K 线的数据和状态
+  @State klineLoading: boolean = false;
+  @State klineError: string = '';
+  @State klinePoints: IndexKlinePoint[] = [];
+
+  // ⭐ 新增：专门给坐标轴用的状态
+  @State klinePriceTicks: number[] = [];   // y 轴价格刻度
+  @State klineDateLabels: string[] = [];   // x 轴日期标签（3 个点）
 
   // ===== 下面这些还是你原来的自选股 / 通知假数据，不动 =====
   private groups: StockGroup[] = [
@@ -179,14 +221,13 @@ struct HarmonyStockPage {
 
 
   // ===== 向 FastAPI 后端请求指数数据 =====
-  async fetchMarketIndices() {
-    // ✅ 用和 UI 一致的状态
+  async fetchMarketIndices(): Promise<void> {
     this.indicesLoading = true;
     this.indicesError = '';
 
     const httpRequest = http.createHttp();
     try {
-      const url = 'http://101.43.185.73:8000/api/indices/realtime';
+      const url: string = 'http://101.43.185.73:8000/api/indices/realtime';
 
       const res = await httpRequest.request(url, {
         method: http.RequestMethod.GET,
@@ -197,32 +238,138 @@ struct HarmonyStockPage {
       console.info('== indices http response ==', JSON.stringify(res));
 
       if (res.responseCode === 200 && res.result) {
-        const raw = JSON.parse(res.result as string) as BackendStockIndex[];
+        const raw: BackendStockIndex[] = JSON.parse(res.result as string) as BackendStockIndex[];
         console.info('== indices parsed ==', JSON.stringify(raw));
 
-        this.marketIndices = raw.map((it: BackendStockIndex): StockIndex => {
-          return {
+        const mapped: StockIndex[] = raw.map((it: BackendStockIndex): StockIndex => {
+          const item: StockIndex = {
             code: it.code,
             name: it.name,
             price: it.price,
             change: it.change,
             changePercent: it.change_percent,
           };
+          return item;
         });
 
+        this.marketIndices = mapped;
         console.info('== indices mapped ==', JSON.stringify(this.marketIndices));
+
+        // ⭐ 新增：如果还没有选中的指数，就默认选 strip 里的第一个
+        if (this.selectedIndexCode === '') {
+          // 用你已经写好的组合函数，保证搜索卡片 + 实时卡片顺序一致
+          const list: StockIndex[] = this.getIndexStripList();
+          if (list.length > 0) {
+            const first: StockIndex = list[0];
+            this.selectedIndexCode = first.code;
+            this.selectedIndexName = first.name;
+            // 直接拉一次 K 线
+            this.fetchIndexKline(first.code);
+          }
+        }
+
       } else {
         this.indicesError = `HTTP ${res.responseCode}`;
+        console.error('== indices http non-200 ==', JSON.stringify(res));
       }
     } catch (e) {
-      // 这里之前你直接 `${e}`，很多时候就是 [Object object]
-      console.error('== indices http error ==', JSON.stringify(e));
-      this.indicesError = JSON.stringify(e); // 直接转成字符串
+      const msg: string = JSON.stringify(e);
+      console.error('== indices http error ==', msg);
+      this.indicesError = msg;
     } finally {
       httpRequest.destroy();
       this.indicesLoading = false;
     }
   }
+
+
+  // ===== 根据当前选中的指数，向后端请求 K 线数据 =====
+  // ===== 根据当前选中的指数，向后端请求 K 线数据 =====
+  async fetchIndexKline(code: string) {
+    this.klineLoading = true;
+    this.klineError = '';
+
+    const httpRequest = http.createHttp();
+    try {
+      const url = `http://101.43.185.73:8000/api/indices/kline?code=${code}&limit=60`;
+
+      const res = await httpRequest.request(url, {
+        method: http.RequestMethod.GET,
+        connectTimeout: 5000,
+        readTimeout: 5000,
+      });
+
+      if (res.responseCode === 200 && res.result) {
+        const raw = JSON.parse(res.result as string) as IndexKlinePoint[];
+        this.klinePoints = raw;
+
+        // ===== 这里专门算 y 轴刻度和 x 轴日期标签 =====
+        const points: IndexKlinePoint[] = raw;
+        const ticks: number[] = [];
+        const labels: string[] = [];
+
+        if (points.length > 0) {
+          // 1. 找最高价 / 最低价
+          let minPrice: number = points[0].low;
+          let maxPrice: number = points[0].high;
+          for (let i: number = 1; i < points.length; i++) {
+            const p: IndexKlinePoint = points[i];
+            if (p.low < minPrice) {
+              minPrice = p.low;
+            }
+            if (p.high > maxPrice) {
+              maxPrice = p.high;
+            }
+          }
+          if (maxPrice === minPrice) {
+            maxPrice = minPrice + 1.0;
+          }
+
+          // 2. 分成 4 等分 → 5 个刻度
+          const step: number = (maxPrice - minPrice) / 4.0;
+          for (let i: number = 0; i <= 4; i++) {
+            ticks.push(minPrice + step * i);
+          }
+
+          // 3. 日期标签：取 开始 / 中间 / 结束 三天
+          const firstIdx: number = 0;
+          const midIdx: number = Math.floor(points.length / 2);
+          const lastIdx: number = points.length - 1;
+
+          const formatLabel = (d: string): string => {
+            // 后端是 yyyy-MM-dd，截成 MM-dd
+            if (d.length >= 5) {
+              return d.substring(5);
+            }
+            return d;
+          };
+
+          labels.push(formatLabel(points[firstIdx].date));
+          labels.push(formatLabel(points[midIdx].date));
+          labels.push(formatLabel(points[lastIdx].date));
+        }
+
+        // 写回状态，给 UI 用
+        this.klinePriceTicks = ticks;
+        this.klineDateLabels = labels;
+      } else {
+        this.klineError = `HTTP ${res.responseCode}`;
+        this.klinePoints = [];
+        this.klinePriceTicks = [];
+        this.klineDateLabels = [];
+      }
+    } catch (e) {
+      this.klineError = `${e}`;
+      this.klinePoints = [];
+      this.klinePriceTicks = [];
+      this.klineDateLabels = [];
+    } finally {
+      httpRequest.destroy();
+      this.klineLoading = false;
+    }
+  }
+
+
 
   private getIndexStripList(): StockIndex[] {
     const result: StockIndex[] = [];
@@ -236,8 +383,6 @@ struct HarmonyStockPage {
     }
     return result;
   }
-
-
 
   // 自定义 TabBar：这里就能完全控制文字颜色
   @Builder tabBarBuilder(title: string, index: number) {
@@ -316,6 +461,12 @@ struct HarmonyStockPage {
   @Builder
   private buildMarketTab() {
     Column() {
+      Text('指数卡片')
+        .fontSize(16)
+        .fontWeight(FontWeight.Medium)
+        .fontColor(Color.White)
+        .margin(15)
+
       // ★ 新增：指数代码查询区域
       this.buildIndexSearchArea();
 
@@ -332,11 +483,10 @@ struct HarmonyStockPage {
     .width('100%')
     .height('100%')
     .backgroundColor(Color.Black)
+    .alignItems(HorizontalAlign.Start)
   }
 
 
-  // ===== 指数横向 strip，带加载/错误状态 =====
-  @Builder
   // ===== 指数横向 strip，带加载/错误状态 + 可删除的搜索卡片 =====
   @Builder
   private buildIndexStrip() {
@@ -462,18 +612,21 @@ struct HarmonyStockPage {
     .backgroundColor('#171717')
     .borderRadius(12)
     .width(140)
+    .onClick(() => {
+      // 点击整张卡片：切换当前选中的指数 + 请求 K 线
+      this.selectedIndexCode = item.code;
+      this.selectedIndexName = item.name;
+      this.fetchIndexKline(item.code);
+    })
   }
 
-
-
-
-
+  @Builder
   @Builder
   private buildKlineCard() {
     Column() {
       // 标题 + 周期切换
       Row({ space: 12 }) {
-        Text('上证指数 K 线')
+        Text(this.selectedIndexName !== '' ? `${this.selectedIndexName} K 线` : '指数 K 线')
           .fontSize(16)
           .fontWeight(FontWeight.Medium)
           .fontColor(Color.White)
@@ -487,31 +640,104 @@ struct HarmonyStockPage {
       .width('100%')
       .padding({ left: 16, right: 16, top: 8 })
 
-      // K 线图占位区域
+      // 主体区域：根据状态展示
       Column() {
-        Text('K 线图区域（UI 占位）')
-          .fontSize(12)
-          .fontColor('#666666')
-          .margin({ bottom: 8 })
+        if (this.klineLoading) {
+          Text('K 线加载中…')
+            .fontSize(12)
+            .fontColor('#888888')
+        } else if (this.klineError) {
+          Text(`K 线加载失败：${this.klineError}`)
+            .fontSize(12)
+            .fontColor('#FF7875')
+        } else if (this.klinePoints.length === 0) {
+          Text('暂无 K 线数据')
+            .fontSize(12)
+            .fontColor('#666666')
+        } else {
+          // ⭐ 有数据：画 y 轴 + K 线 + x 轴
+          Column() {
+            // 上半部分：y 轴 + K 线图
+            Row() {
+              // y 轴价格刻度（用 klinePriceTicks）
+              Column() {
+                ForEach(this.klinePriceTicks, (p: number, idx: number) => {
+                  Text(p.toFixed(0))
+                    .fontSize(10)
+                    .fontColor('#777777')
+                }, (p: number, idx: number) => idx.toString())
+              }
+              .width(40)
+              .height(120)
+              .justifyContent(FlexAlign.SpaceBetween)
 
-        Row({ space: 6 }) {
-          ForEach([1, 2, 3, 4, 5, 6, 7], (id: number) => {
-            Column() {
-              Rect().width(2).height(40).fill('#444444')
-              Rect().width(8).height(24).fill(id % 2 === 0 ? '#39D98A' : '#FF4D4F')
-              Rect().width(2).height(40).fill('#444444')
+              // 右侧 K 线区域（横向滚动）
+              Scroll() {
+                Row({ space: 4 }) {
+                  ForEach(this.klinePoints, (pt: IndexKlinePoint, index: number) => {
+                    Column() {
+                      // 上影线
+                      Rect()
+                        .width(2)
+                        .height(40)
+                        .fill('#444444')
+
+                      // 实体（简单：涨 24，高度；跌 12）
+                      Rect()
+                        .width(8)
+                        .height(pt.close >= pt.open ? 24 : 12)
+                        .fill(pt.close >= pt.open ? '#39D98A' : '#FF4D4F')
+
+                      // 下影线
+                      Rect()
+                        .width(2)
+                        .height(40)
+                        .fill('#444444')
+                    }
+                  }, (pt: IndexKlinePoint, index: number) => `${index}`)
+                }
+              }
+              .scrollable(ScrollDirection.Horizontal)
+              .height(120)
+              .margin({ left: 8 })
             }
-          }, (id: number) => id.toString())
+            .width('100%')
+
+            // 下半部分：x 轴日期标签（用 klineDateLabels）
+            Row() {
+              if (this.klineDateLabels.length === 3) {
+                Text(this.klineDateLabels[0])
+                  .fontSize(10)
+                  .fontColor('#777777')
+
+                Blank()
+
+                Text(this.klineDateLabels[1])
+                  .fontSize(10)
+                  .fontColor('#777777')
+
+                Blank()
+
+                Text(this.klineDateLabels[2])
+                  .fontSize(10)
+                  .fontColor('#777777')
+              }
+            }
+            .width('100%')
+            .margin({ top: 8 })
+          }
         }
       }
       .width('100%')
-      .height(180)
+      .height(200)
       .margin({ top: 8, bottom: 12 })
       .padding(16)
       .backgroundColor('#101010')
       .borderRadius(16)
     }
   }
+
+
 
   @Builder
   private buildKlinePeriodChip(label: string, index: number) {
