@@ -124,52 +124,92 @@ def get_index_kline(
     limit: int = 60,
 ):
     """
-    指数日 K 线数据
+    指数 K 线数据：
     - code: 指数代码，例如 "000001"（上证）、"399001"（深证）、"399006"（创业板）等
-    - period: 暂时只实现 "day"，传 week/month 目前也按 day 处理
+    - period: "day" 日K、"week" 周K、"month" 月K
     - limit: 取最近多少根 K 线
     """
     try:
-        # 1. 把纯数字 code 映射成 akshare 需要的 symbol（带市场前缀）
-        #   上证/沪市：一般用 "sh" 开头
-        #   深证：一般用 "sz" 开头
-        if code.startswith("399"):
-            # 深市指数（例如 399001、399006）
-            symbol = f"sz{code}"
-        else:
-            # 其他常见指数先按沪市处理（000001, 000300, 000688 等）
-            symbol = f"sh{code}"
+      # 1. code -> symbol（和你原来一样）
+      if code.startswith("399"):
+          symbol = f"sz{code}"   # 深市指数
+      else:
+          symbol = f"sh{code}"   # 其他默认沪市
 
-        # 2. 拉取全部日 K 线数据（接口只支持 symbol 这一个参数）
-        df = ak.stock_zh_index_daily(symbol=symbol)
-        # df 列：["date", "open", "high", "low", "close", "volume"]
+      # 2. 拉全部日 K
+      df = ak.stock_zh_index_daily(symbol=symbol)
+      # 确保按日期升序
+      df = df.sort_values("date")
+      if df.empty:
+          raise HTTPException(status_code=404, detail="no kline data")
 
-        # 3. 按日期升序排一下，保证时间顺序正确
-        df = df.sort_values("date")
+      # 把 date 转成 datetime，方便按周 / 月重采样
+      df["date"] = pd.to_datetime(df["date"])
 
-        # 4. 只取最后 limit 条
-        if limit > 0:
-            df = df.tail(limit)
+      # 3. 按 period 聚合
+      if period == "day":
+          df_used = df
+      elif period == "week":
+          # 以周为单位重采样，周五为一周结束
+          df_used = (
+              df.resample("W-FRI", on="date")
+                .agg({
+                    "open": "first",
+                    "high": "max",
+                    "low": "min",
+                    "close": "last",
+                    "volume": "sum",
+                })
+                .dropna()
+                .reset_index()   # 把 date 从索引变回列
+          )
+      elif period == "month":
+          # 以自然月重采样
+          df_used = (
+              df.resample("M", on="date")
+                .agg({
+                    "open": "first",
+                    "high": "max",
+                    "low": "min",
+                    "close": "last",
+                    "volume": "sum",
+                })
+                .dropna()
+                .reset_index()
+          )
+      else:
+          # 理论上不会走到这里，兜底一下
+          df_used = df
 
-        # 5. 转成前端要的结构
-        points: list[KlinePoint] = []
-        for _, row in df.iterrows():
-            p = KlinePoint(
-                date=str(row["date"]),
-                open=float(row["open"]),
-                high=float(row["high"]),
-                low=float(row["low"]),
-                close=float(row["close"]),
-                volume=float(row["volume"]),
-            )
-            points.append(p)
+      # 再按日期升序一次（保险）
+      df_used = df_used.sort_values("date")
 
-        return points
+      # 4. 只要最后 limit 根
+      if limit > 0:
+          df_used = df_used.tail(limit)
 
+      # 5. 转成前端要的结构
+      points: list[KlinePoint] = []
+      for _, row in df_used.iterrows():
+          p = KlinePoint(
+              date=str(row["date"].date()),   # 转成 "YYYY-MM-DD"
+              open=float(row["open"]),
+              high=float(row["high"]),
+              low=float(row["low"]),
+              close=float(row["close"]),
+              volume=float(row["volume"]),
+          )
+          points.append(p)
+
+      return points
+
+    except HTTPException:
+        # 上面主动抛的，直接透传
+        raise
     except Exception as e:
-        print("ERROR in /api/indices/kline:", e)
-        traceback.print_exc()
-        raise HTTPException(status_code=500, detail=f"backend error: {e}")
+      print("ERROR in /api/indices/kline:", e)
+      traceback.print_exc()
+      raise HTTPException(status_code=500, detail=f"backend error: {e}")
 
 
 

@@ -127,6 +127,9 @@ struct HarmonyStockPage {
   @State selectedKlineLow: number = 0;
   @State selectedKlineClose: number = 0;
 
+  // ⭐ 原始日 K 线（后端返回的原始数据）
+  @State rawDailyKline: IndexKlinePoint[] = [];
+
   // ===== 下面这些还是你原来的自选股 / 通知假数据，不动 =====
   private groups: StockGroup[] = [
     {
@@ -423,10 +426,12 @@ struct HarmonyStockPage {
       if (res.responseCode === 200 && res.result) {
         const raw: IndexKlinePoint[] =
           JSON.parse(res.result as string) as IndexKlinePoint[];
-        this.klinePoints = raw;
 
-        // ⭐ 所有几何计算都在这里一次性完成
-        this.recomputeKlineGeom();
+        // ⭐ 1. 后端返回的一律当作“日K原始数据”保存下来
+        this.rawDailyKline = raw;
+
+        // ⭐ 2. 根据当前 klinePeriodIndex（日/周/月）生成要绘制的 klinePoints
+        this.recomputeKlineView();
 
         // ⭐ 默认选中最后一根（最新一根）
         if (raw.length > 0) {
@@ -450,6 +455,149 @@ struct HarmonyStockPage {
       httpRequest.destroy();
       this.klineLoading = false;
     }
+  }
+
+  // 根据当前 klinePeriodIndex（日/周/月），从原始日K生成要显示的 klinePoints
+  private recomputeKlineView(): void {
+    let viewPoints: IndexKlinePoint[] = [];
+
+    if (this.rawDailyKline.length === 0) {
+      this.klinePoints = [];
+      this.klineGeoms = [];
+      this.klineXLabels = [];
+      return;
+    }
+
+    // 0: 日K  1: 周K  2: 月K
+    if (this.klinePeriodIndex === 0) {
+      // 日K：直接用原始数据
+      viewPoints = this.rawDailyKline;
+    } else if (this.klinePeriodIndex === 1) {
+      // 周K：用前端把日K按 5 天一组粗略合成
+      viewPoints = this.aggregateToWeek(this.rawDailyKline);
+    } else {
+      // 月K：按月份合成
+      viewPoints = this.aggregateToMonth(this.rawDailyKline);
+    }
+
+    this.klinePoints = viewPoints;
+    // ⭐ 用新的 klinePoints 重新算几何信息和坐标轴
+    this.recomputeKlineGeom();
+  }
+
+  // 粗略按“每 5 个交易日”合成一根周K
+  private aggregateToWeek(points: IndexKlinePoint[]): IndexKlinePoint[] {
+    const result: IndexKlinePoint[] = [];
+    const n: number = points.length;
+    let i: number = 0;
+
+    while (i < n) {
+      const chunk: IndexKlinePoint[] = [];
+      for (let j: number = 0; j < 5 && i < n; j++, i++) {
+        chunk.push(points[i]);
+      }
+      if (chunk.length === 0) {
+        break;
+      }
+
+      const first: IndexKlinePoint = chunk[0];
+      const last: IndexKlinePoint = chunk[chunk.length - 1];
+
+      let high: number = first.high;
+      let low: number = first.low;
+      let volume: number = 0;
+
+      for (let k: number = 0; k < chunk.length; k++) {
+        const p: IndexKlinePoint = chunk[k];
+        if (p.high > high) {
+          high = p.high;
+        }
+        if (p.low < low) {
+          low = p.low;
+        }
+        volume += p.volume;
+      }
+
+      const agg: IndexKlinePoint = {
+        date: last.date,          // 用这一周最后一天的日期
+        open: first.open,         // 第一日开盘
+        close: last.close,        // 最后一日收盘
+        high: high,
+        low: low,
+        volume: volume,
+      };
+      result.push(agg);
+    }
+
+    return result;
+  }
+
+  // 按月份合成月K（根据 date 的 "YYYY-MM" 粗略分组）
+  private aggregateToMonth(points: IndexKlinePoint[]): IndexKlinePoint[] {
+    const result: IndexKlinePoint[] = [];
+    let currentKey: string = '';
+    let monthOpen: number = 0;
+    let monthHigh: number = 0;
+    let monthLow: number = 0;
+    let monthVolume: number = 0;
+    let hasData: boolean = false;
+
+    for (let i: number = 0; i < points.length; i++) {
+      const p: IndexKlinePoint = points[i];
+      const key: string = p.date.length >= 7 ? p.date.substring(0, 7) : p.date; // "YYYY-MM"
+
+      if (!hasData) {
+        // 第一条
+        currentKey = key;
+        monthOpen = p.open;
+        monthHigh = p.high;
+        monthLow = p.low;
+        monthVolume = p.volume;
+        hasData = true;
+      } else if (key === currentKey) {
+        // 同一个月内，累积 high / low / volume
+        if (p.high > monthHigh) {
+          monthHigh = p.high;
+        }
+        if (p.low < monthLow) {
+          monthLow = p.low;
+        }
+        monthVolume += p.volume;
+      } else {
+        // 月份切换，把上一个月收尾
+        const prev: IndexKlinePoint = points[i - 1];
+        result.push({
+          date: prev.date,       // 上一个月最后一天的日期
+          open: monthOpen,
+          close: prev.close,
+          high: monthHigh,
+          low: monthLow,
+          volume: monthVolume,
+        });
+
+        // 开始下一个月
+        currentKey = key;
+        monthOpen = p.open;
+        monthHigh = p.high;
+        monthLow = p.low;
+        monthVolume = p.volume;
+      }
+    }
+
+    // 最后一个月补上
+    if (hasData) {
+      const last: IndexKlinePoint = points[points.length - 1];
+      result.push({
+        date: last.date,
+        open: monthOpen,
+        close: last.close,
+        high: monthHigh,
+        low: monthLow,
+        volume: monthVolume,
+      });
+    }
+
+    return result;
   }
 
 
@@ -889,7 +1037,13 @@ struct HarmonyStockPage {
       .backgroundColor(this.klinePeriodIndex === index ? '#333333' : '#181818')
       .borderRadius(12)
       .onClick(() => {
-        this.klinePeriodIndex = index
+        // 1. 切换状态
+        this.klinePeriodIndex = index;
+
+        // 2. 用当前原始日K重新计算要显示的 K 线
+        if (this.rawDailyKline.length > 0) {
+          this.recomputeKlineView();
+        }
       })
   }
 
