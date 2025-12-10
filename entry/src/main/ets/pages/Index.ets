@@ -130,6 +130,16 @@ struct HarmonyStockPage {
   // ⭐ 原始日 K 线（后端返回的原始数据）
   @State rawDailyKline: IndexKlinePoint[] = [];
 
+  // 每根 K 线实体宽度
+  private candleBodyWidth: number = 8;
+  // 相邻两根 K 线之间的间距（Row 的 space）
+  private candleGap: number = 4;
+  // 右侧额外预留一点空白，避免最后一个日期被卡边上
+  private klineTailPadding: number = 16;
+
+
+
+
   // ===== 下面这些还是你原来的自选股 / 通知假数据，不动 =====
   private groups: StockGroup[] = [
     {
@@ -283,15 +293,16 @@ struct HarmonyStockPage {
 
         // ⭐ 新增：如果还没有选中的指数，就默认选 strip 里的第一个
         if (this.selectedIndexCode === '') {
-          // 用你已经写好的组合函数，保证搜索卡片 + 实时卡片顺序一致
           const list: StockIndex[] = this.getIndexStripList();
           if (list.length > 0) {
             const first: StockIndex = list[0];
             this.selectedIndexCode = first.code;
             this.selectedIndexName = first.name;
-            // 直接拉一次 K 线
-            this.fetchIndexKline(first.code);
+
+            const period: string = this.getKlinePeriodParam();
+            this.fetchIndexKline(first.code, period);
           }
+
         }
 
       } else {
@@ -386,36 +397,45 @@ struct HarmonyStockPage {
       geoms.push(geom);
     }
 
-    // 3. x 轴标签，取头 / 中 / 尾三天
-    const firstIdx: number = 0;
-    const midIdx: number = Math.floor(points.length / 2);
-    const lastIdx: number = points.length - 1;
+    // 3. x 轴标签：最多取 5 个点，均匀分布在头到尾之间
+    const total: number = points.length;
+    const maxLabels: number = 5;
+    const actualLabels: number = total >= maxLabels ? maxLabels : total;
 
-    const firstLabel: string = points[firstIdx].date.length >= 5
-      ? points[firstIdx].date.substring(5)
-      : points[firstIdx].date;
-    const midLabel: string = points[midIdx].date.length >= 5
-      ? points[midIdx].date.substring(5)
-      : points[midIdx].date;
-    const lastLabel: string = points[lastIdx].date.length >= 5
-      ? points[lastIdx].date.substring(5)
-      : points[lastIdx].date;
+    if (actualLabels > 0) {
+      const lastIndex: number = total - 1;
 
-    labels.push(firstLabel, midLabel, lastLabel);
+      for (let i: number = 0; i < actualLabels; i++) {
+        // 均匀取样：i 从 0 到 actualLabels-1，映射到 0~lastIndex
+        let idx: number;
+        if (actualLabels === 1) {
+          idx = 0;
+        } else {
+          idx = Math.floor(i * lastIndex / (actualLabels - 1));
+        }
+
+        const dateStr: string = points[idx].date;
+        const label: string = dateStr.length >= 5 ? dateStr.substring(5) : dateStr;
+        labels.push(label);
+      }
+    }
 
     this.klineGeoms = geoms;
     this.klineXLabels = labels;
+
   }
 
 
   // ===== 根据当前选中的指数，向后端请求 K 线数据 =====
-  async fetchIndexKline(code: string): Promise<void> {
+  // 根据当前选中的指数 + 周期，向后端请求 K 线数据
+  async fetchIndexKline(code: string, period: string): Promise<void> {
     this.klineLoading = true;
     this.klineError = '';
 
     const httpRequest = http.createHttp();
     try {
-      const url: string = `http://101.43.185.73:8000/api/indices/kline?code=${code}&limit=60`;
+      const url: string =
+        `http://101.43.185.73:8000/api/indices/kline?code=${code}&period=${period}&limit=60`;
 
       const res = await httpRequest.request(url, {
         method: http.RequestMethod.GET,
@@ -426,20 +446,10 @@ struct HarmonyStockPage {
       if (res.responseCode === 200 && res.result) {
         const raw: IndexKlinePoint[] =
           JSON.parse(res.result as string) as IndexKlinePoint[];
+        this.klinePoints = raw;
 
-        // ⭐ 1. 后端返回的一律当作“日K原始数据”保存下来
-        this.rawDailyKline = raw;
-
-        // ⭐ 2. 根据当前 klinePeriodIndex（日/周/月）生成要绘制的 klinePoints
-        this.recomputeKlineView();
-
-        // ⭐ 默认选中最后一根（最新一根）
-        if (raw.length > 0) {
-          this.onKlineSelected(raw.length - 1);
-        } else {
-          this.selectedKlineIndex = -1;
-        }
-
+        // ⭐ 所有几何计算都在这里一次性完成
+        this.recomputeKlineGeom();
       } else {
         this.klineError = `HTTP ${res.responseCode}`;
         this.klinePoints = [];
@@ -455,6 +465,17 @@ struct HarmonyStockPage {
       httpRequest.destroy();
       this.klineLoading = false;
     }
+  }
+
+
+  private getKlinePeriodParam(): string {
+    if (this.klinePeriodIndex === 1) {
+      return 'week';   // 周 K
+    }
+    if (this.klinePeriodIndex === 2) {
+      return 'month';  // 月 K
+    }
+    return 'day';      // 默认日 K
   }
 
   // 根据当前 klinePeriodIndex（日/周/月），从原始日K生成要显示的 klinePoints
@@ -631,6 +652,18 @@ struct HarmonyStockPage {
     }
     return result;
   }
+
+  // 计算整段 K 线区域的总宽度，给蜡烛 Row 和 x 轴 Row 共用
+  // 计算整段 K 线区域的总宽度，刚好包住所有蜡烛
+  private getKlineTotalWidth(): number {
+    const count: number = this.klineGeoms.length;
+    if (count <= 0) {
+      return 0;
+    }
+    // 所有实体宽度 + 间距（有 count - 1 个 gap）
+    return count * this.candleBodyWidth + (count - 1) * this.candleGap;
+  }
+
 
   // 自定义 TabBar：这里就能完全控制文字颜色
   @Builder tabBarBuilder(title: string, index: number) {
@@ -864,9 +897,11 @@ struct HarmonyStockPage {
       // 点击整张卡片：切换当前选中的指数 + 请求 K 线
       this.selectedIndexCode = item.code;
       this.selectedIndexName = item.name;
-      this.fetchIndexKline(item.code);
+      const period: string = this.getKlinePeriodParam();
+      this.fetchIndexKline(item.code, period);
     })
   }
+
 
   @Builder
   private buildKlineCard() {
@@ -914,7 +949,6 @@ struct HarmonyStockPage {
         .padding({ left: 16, right: 16, top: 4, bottom: 4 })
       }
 
-
       // 主体区域
       Column() {
         if (this.klineLoading) {
@@ -931,9 +965,9 @@ struct HarmonyStockPage {
             .fontColor('#666666')
         } else {
           Column() {
-            // 上：y 轴 + K 线区域
+            // 上：y 轴 + (K 线 + x 轴 Scroll)
             Row() {
-              // y 轴刻度：最高 / 中间 / 最低
+              // y 轴刻度：最高 / 中间 / 最低（保持不动）
               Column() {
                 Text(this.klineMaxPrice.toFixed(0))
                   .fontSize(10)
@@ -951,68 +985,70 @@ struct HarmonyStockPage {
               .height(120)
               .justifyContent(FlexAlign.SpaceBetween)
 
-              // 右侧：蜡烛图（横向可滚动）
+              // 右侧：K 线 + x 轴 一起横向可滚动
               Scroll() {
-                Row({ space: 4 }) {
-                  ForEach(this.klineGeoms, (g: IndexKlineGeom, idx: number) => {
-                    Column() {
-                      // 顶部空白：决定这根蜡烛整体的“高低位置”
-                      Blank().height(g.topGap)
+                Column() {
+                  // ① 蜡烛图区域
+                  Row({ space: this.candleGap }) {
+                    ForEach(this.klineGeoms, (g: IndexKlineGeom, idx: number) => {
+                      Column() {
+                        // 顶部空白：决定这根蜡烛整体的“高低位置”
+                        Blank().height(g.topGap)
 
-                      Rect()      // 上影线
-                        .width(2)
-                        .height(g.upperWick)
-                        .fill('#444444')
+                        Rect()      // 上影线
+                          .width(2)
+                          .height(g.upperWick)
+                          .fill('#444444')
 
-                      Rect()      // 实体
-                        .width(8)
-                        .height(g.bodyHeight)
-                        .fill(g.isUp ? '#39D98A' : '#FF4D4F')
+                        Rect()      // 实体
+                          .width(this.candleBodyWidth)
+                          .height(g.bodyHeight)
+                          .fill(g.isUp ? '#39D98A' : '#FF4D4F')
 
-                      Rect()      // 下影线
-                        .width(2)
-                        .height(g.lowerWick)
-                        .fill('#444444')
+                        Rect()      // 下影线
+                          .width(2)
+                          .height(g.lowerWick)
+                          .fill('#444444')
 
-                      // 底部补一点空白
-                      Blank().height(4)
+                        // 底部补一点空白
+                        Blank().height(4)
+                      }
+                      // ⭐ 高亮当前选中的那一根
+                      .border({
+                        width: this.selectedKlineIndex === idx ? 1 : 0,
+                        color: this.selectedKlineIndex === idx ? '#FACC15' : '#000000'
+                      })
+                      // ⭐ 点哪根选哪根
+                      .onClick(() => {
+                        this.onKlineSelected(idx);
+                      })
+                    }, (g: IndexKlineGeom, idx: number) => `${idx}`)
+                  }
+                  .width(this.getKlineTotalWidth())   // K 线区域的总宽度
+                  .height(120)
+
+                  // ② x 轴日期标签：放在同一个 Scroll 里，宽度与 K 线一致
+                  // ② x 轴日期标签：放在同一个 Scroll 里，宽度与 K 线一致
+                  if (this.klineXLabels.length > 0) {
+                    Row() {
+                      ForEach(this.klineXLabels, (label: string, idx: number) => {
+                        Text(label)
+                          .fontSize(10)
+                          .fontColor('#777777')
+                      }, (label: string, idx: number) => `${idx}-${label}`)
                     }
-                    // ⭐ 高亮当前选中的那一根
-                    .border({
-                      width: this.selectedKlineIndex === idx ? 1 : 0,
-                      color: this.selectedKlineIndex === idx ? '#FACC15' : '#000000'
-                    })
-                    // ⭐ 点哪根选哪根
-                    .onClick(() => {
-                      this.onKlineSelected(idx);
-                    })
-                  }, (g: IndexKlineGeom, idx: number) => `${idx}`)
-                }
+                    .width(this.getKlineTotalWidth())
+                    .justifyContent(FlexAlign.SpaceBetween) // N 个点：首、中、若干中间、尾
+                    .margin({ bottom: 10 })
+                  }
+
+                }.padding({ right: 32})
               }
               .scrollable(ScrollDirection.Horizontal)
-              .height(120)
+              .height(140)
               .margin({ left: 8 })
             }
             .width('100%')
-
-            // 下：x 轴日期标签
-            Row() {
-              if (this.klineXLabels.length === 3) {
-                Text(this.klineXLabels[0])
-                  .fontSize(10)
-                  .fontColor('#777777')
-                Blank()
-                Text(this.klineXLabels[1])
-                  .fontSize(10)
-                  .fontColor('#777777')
-                Blank()
-                Text(this.klineXLabels[2])
-                  .fontSize(10)
-                  .fontColor('#777777')
-              }
-            }
-            .width('100%')
-            .margin({ top: 8 })
           }
         }
       }
@@ -1037,12 +1073,16 @@ struct HarmonyStockPage {
       .backgroundColor(this.klinePeriodIndex === index ? '#333333' : '#181818')
       .borderRadius(12)
       .onClick(() => {
-        // 1. 切换状态
+        // 如果点的是当前已经选中的周期，就不用重复请求
+        if (this.klinePeriodIndex === index) {
+          return;
+        }
         this.klinePeriodIndex = index;
 
-        // 2. 用当前原始日K重新计算要显示的 K 线
-        if (this.rawDailyKline.length > 0) {
-          this.recomputeKlineView();
+        // 已经选中了某个指数，才有必要重新拉 K 线
+        if (this.selectedIndexCode !== '') {
+          const period: string = this.getKlinePeriodParam();
+          this.fetchIndexKline(this.selectedIndexCode, period);
         }
       })
   }
