@@ -742,14 +742,19 @@ struct HarmonyStockPage {
   @Builder
   private buildMarketTab() {
     Column() {
-      Text('指数卡片')
-        .fontSize(16)
-        .fontWeight(FontWeight.Medium)
-        .fontColor(Color.White)
-        .margin(15)
+      Row(){
+        Text('指数卡片')
+          .fontSize(16)
+          .fontWeight(FontWeight.Medium)
+          .fontColor(Color.White)
+          .margin(15)
 
-      // ★ 新增：指数代码查询区域
-      this.buildIndexSearchArea();
+        // ★ 新增：指数代码查询区域
+        this.buildIndexSearchArea();
+      }
+      .width('100%')                             // ⭐ 拉满整行宽度
+      .justifyContent(FlexAlign.SpaceBetween)    // ⭐ 左右两端对齐
+      .alignItems(VerticalAlign.Center)
 
       // 指数横向滚动
       this.buildIndexStrip();
@@ -831,7 +836,7 @@ struct HarmonyStockPage {
             this.queryIndexByCode();
           })
       }
-      .padding({ left: 16, right: 16, top: 8, bottom: 4 })
+      .padding({ left: 16, right: 48, top: 8, bottom: 4 })
 
       // 下：状态提示
       if (this.indexSearchLoading) {
@@ -1053,7 +1058,7 @@ struct HarmonyStockPage {
         }
       }
       .width('100%')
-      .height(200)
+      .height(160)
       .margin({ top: 8, bottom: 12 })
       .padding(16)
       .backgroundColor('#101010')
