@@ -8,39 +8,45 @@ for k in [
 ]:
     os.environ.pop(k, None)
 
-# 0.2 告诉 requests：完全不要管环境里的代理
-import requests  # 注意：必须在 akshare 之前
+# 0.2 禁用 requests 对代理的读取
+import requests
 requests.sessions.Session.trust_env = False
 
+
+# ===== 标准库 & 第三方 =====
 import time
+import traceback
+import pandas as pd
+from datetime import datetime, timedelta
+from typing import Literal, Optional, List
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 import akshare as ak
-import pandas as pd
-import traceback
-from datetime import datetime, timedelta
-from typing import Literal, Optional, List
+
+# ===== 导入数据库模块 =====
+from db import SessionLocal, engine, Base
+from models import IndexQuoteModel, StockQuoteModel, KlineModel
 
 
-# ===== 缓存模块：所有 API 共用 =====
-CACHE = {}  # { key: {"data": result, "ts": timestamp} }
-CACHE_TTL = 30  # 30 秒缓存
+# ===== 创建数据库表 =====
+Base.metadata.create_all(bind=engine)
 
 
-def get_cache(cache_key: str):
-    now = time.time()
-    item = CACHE.get(cache_key)
-    if item and now - item["ts"] < CACHE_TTL:
+# ===== 缓存模块 =====
+CACHE: dict = {}
+CACHE_TTL = 30  # 秒
+
+
+def get_cache(key: str):
+    item = CACHE.get(key)
+    if item and time.time() - item["ts"] < CACHE_TTL:
         return item["data"]
     return None
 
 
-def set_cache(cache_key: str, data):
-    CACHE[cache_key] = {
-        "data": data,
-        "ts": time.time()
-    }
+def set_cache(key: str, data):
+    CACHE[key] = {"data": data, "ts": time.time()}
 
 
 # ===== FastAPI 初始化 =====
@@ -60,7 +66,7 @@ def root():
     return {"message": "HarmonyStock backend is running"}
 
 
-# ===== 通用数据结构 =====
+# ===== Pydantic 数据结构 =====
 class Quote(BaseModel):
     code: str
     name: str
@@ -79,34 +85,25 @@ class KlinePoint(BaseModel):
 
 
 # ===== 工具函数 =====
-
 def map_stock_code_to_symbol(code: str) -> str:
-    if code[0] in ("6", "9"):
-        return f"sh{code}"
-    else:
-        return f"sz{code}"
+    return f"sh{code}" if code[0] in ("6", "9") else f"sz{code}"
 
 
 def map_index_code_to_symbol(code: str) -> str:
-    if code.startswith("399"):
-        return f"sz{code}"
-    else:
-        return f"sh{code}"
+    return f"sz{code}" if code.startswith("399") else f"sh{code}"
 
 
 def map_stock_code_to_xq_symbol(code: str) -> str:
     if code[0] in ("0", "2", "3"):
         return f"SZ{code}"
-    elif code[0] in ("6", "9"):
+    if code[0] in ("6", "9"):
         return f"SH{code}"
-    else:
-        raise ValueError(f"invalid stock code: {code}")
+    raise ValueError(f"invalid code {code}")
 
 
 # =====================================================================
-# 1. 实时行情列表（仅指数）
+# 1. 实时指数列表接口（带缓存 + 写 DB + DB 兜底）
 # =====================================================================
-
 @app.get("/api/quote", response_model=List[Quote])
 def get_quote(
     type: str = Query("index"),
@@ -123,66 +120,114 @@ def get_quote(
 
         df = ak.stock_zh_index_spot_sina()
         if df is None or df.empty:
-            raise HTTPException(500, "failed to load index data")
+            raise Exception("source error")
 
         if codes:
-            wanted_codes = [c.strip() for c in codes.split(",")]
+            codes_list = [c.strip() for c in codes.split(",") if c.strip()]
         else:
-            wanted_codes = ["000001", "399001", "399006"]
+            codes_list = ["000001", "399001", "399006"]
 
-        symbols = [map_index_code_to_symbol(c) for c in wanted_codes]
+        symbols = [map_index_code_to_symbol(c) for c in codes_list]
         df_sel = df[df["代码"].isin(symbols)]
 
-        result = []
-        for _, row in df_sel.iterrows():
-            raw_pct = row["涨跌幅"]
-            if isinstance(raw_pct, str):
-                raw_pct = raw_pct.replace("%", "")
-            result.append(
-                Quote(
+        if df_sel.empty:
+            raise Exception("no index rows after filter")
+
+        result: List[Quote] = []
+
+        # 一次性打开 DB 会话，不要在循环里面反复创建
+        db = SessionLocal()
+        try:
+            for _, row in df_sel.iterrows():
+                pct = row["涨跌幅"]
+                if isinstance(pct, str):
+                    pct = pct.replace("%", "")
+
+                q = Quote(
                     code=row["代码"][-6:],
                     name=row["名称"],
                     price=float(row["最新价"]),
                     change=float(row["涨跌额"]),
-                    change_percent=float(raw_pct)
+                    change_percent=float(pct),
                 )
-            )
+                result.append(q)
+
+                db_item = IndexQuoteModel(
+                    code=q.code,
+                    name=q.name,
+                    price=q.price,
+                    change=q.change,
+                    change_percent=q.change_percent,
+                    updated_at=datetime.utcnow(),
+                )
+                db.merge(db_item)
+
+            db.commit()
+        finally:
+            db.close()
 
         set_cache(cache_key, result)
         return result
 
-    except Exception as e:
+    except Exception:
         traceback.print_exc()
-        raise HTTPException(status_code=500, detail=str(e))
+
+        # ===== 兜底：数据库读取 =====
+        db = SessionLocal()
+        try:
+            items = db.query(IndexQuoteModel).all()
+        finally:
+            db.close()
+
+        if not items:
+            raise HTTPException(status_code=500, detail="no index data")
+
+        return [
+            Quote(
+                code=i.code,
+                name=i.name,
+                price=i.price,
+                change=i.change,
+                change_percent=i.change_percent,
+            )
+            for i in items
+        ]
 
 
 # =====================================================================
-# 2. 单条实时行情（指数 / 股票）
+# 2. 单条实时行情（指数 / 股票）（缓存 + 写 DB + DB 兜底）
 # =====================================================================
-
 @app.get("/api/quote/by_code", response_model=Quote)
 def get_quote_by_code(
     type: Literal["index", "stock"],
     code: str,
 ):
+    """
+    按代码获取一条实时行情（指数 / 股票），带缓存 + DB 兜底。
+    股票部分兼容两种返回格式：
+      1）宽表：列名直接是 name / current_price 等
+      2）纵向 KV 表：只有 item / value，两列，key 在 item 里
+    """
 
     cache_key = f"quote_{type}_{code}"
     cached = get_cache(cache_key)
-    if cached:
+    if cached is not None:
         return cached
 
     try:
-        # ===== 指数 =====
+        # ========================
+        # 1) 指数：新浪接口
+        # ========================
         if type == "index":
             df = ak.stock_zh_index_spot_sina()
             if df is None or df.empty:
-                raise HTTPException(500, "failed to load index data")
+                raise Exception("failed to load index data from sina")
 
-            symbol = map_index_code_to_symbol(code)
+            symbol = map_index_code_to_symbol(code)  # 000001 -> sh000001
             df_sel = df[df["代码"] == symbol]
 
             if df_sel.empty:
-                raise HTTPException(404, "index not found")
+                raise Exception(f"index {code} not found in sina data")
 
             row = df_sel.iloc[0]
             pct = row["涨跌幅"]
@@ -191,43 +236,171 @@ def get_quote_by_code(
 
             result = Quote(
                 code=code,
-                name=row["名称"],
+                name=str(row["名称"]),
                 price=float(row["最新价"]),
                 change=float(row["涨跌额"]),
                 change_percent=float(pct),
             )
 
+            # 写入指数表
+            db = SessionLocal()
+            try:
+                db.merge(IndexQuoteModel(
+                    code=code,
+                    name=str(row["名称"]),
+                    price=float(row["最新价"]),
+                    change=float(row["涨跌额"]),
+                    change_percent=float(pct),
+                    updated_at=datetime.utcnow(),
+                ))
+                db.commit()
+            finally:
+                db.close()
+
             set_cache(cache_key, result)
             return result
 
-        # ===== 股票（雪球）=====
-        xq_symbol = map_stock_code_to_xq_symbol(code)
-        df = ak.stock_individual_spot_xq(symbol=xq_symbol)
+        # ========================
+        # 2) 股票：雪球单票接口
+        # ========================
+        elif type == "stock":
+            xq_symbol = map_stock_code_to_xq_symbol(code)  # 300750 -> SZ300750 / SH600000
+            df = ak.stock_individual_spot_xq(symbol=xq_symbol)
 
-        if df is None or df.empty:
-            raise HTTPException(404, "stock not found")
+            if df is None or df.empty:
+                raise Exception(f"stock {code} not found from xueqiu")
 
-        row = df.iloc[0]
+            cols = list(df.columns)
+            print("DEBUG stock_individual_spot_xq columns:", cols)
+
+            # 小工具：安全转 float
+            def to_float(val):
+                if isinstance(val, str):
+                    val = val.replace("%", "").replace(",", "").strip()
+                return float(val)
+
+            # ---- 情况 A：宽表（多列，直接取字段）----
+            if "item" not in cols or "value" not in cols:
+                def pick_col(candidates):
+                    for cand in candidates:
+                        if cand in cols:
+                            return cand
+                    return None
+
+                name_col = pick_col(["name", "股票名称", "display_name", "名称"])
+                price_col = pick_col(["current_price", "current", "现价", "最新价"])
+                change_amt_col = pick_col(["change_amount", "chg", "涨跌额", "涨跌"])
+                change_pct_col = pick_col(["change_rate", "percent", "涨跌幅", "涨幅"])
+
+                if not all([name_col, price_col, change_amt_col, change_pct_col]):
+                    raise Exception(f"unexpected xq wide-table columns: {cols}")
+
+                row = df.iloc[0]
+                name = str(row[name_col])
+                price = to_float(row[price_col])
+                change = to_float(row[change_amt_col])
+                change_percent = to_float(row[change_pct_col])
+
+            # ---- 情况 B：纵向 KV 表（只有 item / value 两列）----
+            else:
+                kv = {}
+                for _, r in df.iterrows():
+                    key = str(r["item"])
+                    kv[key] = r["value"]
+                print("DEBUG stock_individual_spot_xq kv-keys:", list(kv.keys()))
+
+                # 你当前版本返回中的关键字段（已从日志确认）：
+                # 名称: "名称"
+                # 当前价: " 现价"（注意前面有空格） 或 "现价"
+                # 涨跌额: "涨跌"
+                # 涨跌幅: "涨幅"
+                if "名称" not in kv:
+                    raise Exception(f"no '名称' key in xq kv: {list(kv.keys())}")
+
+                # 现价：优先带空格的 " 现价"，退而求其次 "现价"
+                if " 现价" in kv:
+                    raw_price = kv[" 现价"]
+                elif "现价" in kv:
+                    raw_price = kv["现价"]
+                else:
+                    raise Exception(f"no current price key in xq kv: {list(kv.keys())}")
+
+                if "涨跌" not in kv or "涨幅" not in kv:
+                    raise Exception(f"no change keys in xq kv: {list(kv.keys())}")
+
+                name = str(kv["名称"])
+                price = to_float(raw_price)
+                change = to_float(kv["涨跌"])
+                change_percent = to_float(kv["涨幅"])
+
+            # 统一生成结果 + 写 DB
+            result = Quote(
+                code=code,
+                name=name,
+                price=price,
+                change=change,
+                change_percent=change_percent,
+            )
+
+            db = SessionLocal()
+            try:
+                db.merge(StockQuoteModel(
+                    code=code,
+                    name=name,
+                    price=price,
+                    change=change,
+                    change_percent=change_percent,
+                    updated_at=datetime.utcnow(),
+                ))
+                db.commit()
+            finally:
+                db.close()
+
+            set_cache(cache_key, result)
+            return result
+
+        # 正常不会走到这里，但做个防御
+        else:
+            raise HTTPException(status_code=400, detail="invalid type, must be index or stock")
+
+    except HTTPException:
+        # 显式抛的 HTTP 错误直接传给 FastAPI
+        raise
+
+    except Exception as e:
+        # 统一异常：尝试用数据库兜底
+        traceback.print_exc()
+
+        db = SessionLocal()
+        try:
+            if type == "index":
+                item = db.query(IndexQuoteModel).filter_by(code=code).first()
+            elif type == "stock":
+                item = db.query(StockQuoteModel).filter_by(code=code).first()
+            else:
+                item = None
+        finally:
+            db.close()
+
+        if not item:
+            # 源头挂了、DB 里也没有，就只能报 500
+            raise HTTPException(status_code=500, detail=f"backend error and no fallback: {e}")
+
         result = Quote(
-            code=code,
-            name=row.get("name", ""),
-            price=float(row.get("current_price", 0)),
-            change=float(row.get("change_amount", 0)),
-            change_percent=float(row.get("change_rate", 0)),
+            code=item.code,
+            name=item.name,
+            price=item.price,
+            change=item.change,
+            change_percent=item.change_percent,
         )
-
         set_cache(cache_key, result)
         return result
 
-    except Exception as e:
-        traceback.print_exc()
-        raise HTTPException(500, str(e))
 
 
 # =====================================================================
-# 3. K 线（指数 / 股票）
+# 3. K 线（缓存 + 写 DB + DB 兜底）
 # =====================================================================
-
 @app.get("/api/kline", response_model=List[KlinePoint])
 def get_kline(
     type: Literal["index", "stock"],
@@ -235,13 +408,13 @@ def get_kline(
     period: Literal["day", "week", "month"] = "day",
     limit: int = 60,
 ):
-
     cache_key = f"kline_{type}_{code}_{period}_{limit}"
     cached = get_cache(cache_key)
     if cached:
         return cached
 
     try:
+        # ===== 1. 抓取数据 =====
         if type == "index":
             symbol = map_index_code_to_symbol(code)
             df = ak.stock_zh_index_daily(symbol=symbol)
@@ -256,15 +429,15 @@ def get_kline(
             )
 
         if df is None or df.empty:
-            raise HTTPException(404, "no kline data")
+            raise Exception("no kline source")
 
-        # 列名统一
+        # ===== 2. 列名统一 =====
         mapping = {
             "日期": "date",
             "开盘": "open",
-            "收盘": "close",
             "最高": "high",
             "最低": "low",
+            "收盘": "close",
             "成交量": "volume",
         }
         df = df.rename(columns=mapping)
@@ -272,7 +445,7 @@ def get_kline(
         df["date"] = pd.to_datetime(df["date"])
         df = df.sort_values("date")
 
-        # 周/月 聚合
+        # ===== 3. 聚合 =====
         if period == "week":
             df = (
                 df.resample("W-FRI", on="date")
@@ -281,7 +454,7 @@ def get_kline(
                     "high": "max",
                     "low": "min",
                     "close": "last",
-                    "volume": "sum"
+                    "volume": "sum",
                 })
                 .dropna()
                 .reset_index()
@@ -294,7 +467,7 @@ def get_kline(
                     "high": "max",
                     "low": "min",
                     "close": "last",
-                    "volume": "sum"
+                    "volume": "sum",
                 })
                 .dropna()
                 .reset_index()
@@ -302,6 +475,26 @@ def get_kline(
 
         df = df.tail(limit)
 
+        # ===== 4. 写入数据库 =====
+        db = SessionLocal()
+        try:
+            for _, row in df.iterrows():
+                db_item = KlineModel(
+                    type=type,
+                    code=code,
+                    date=row["date"].date(),
+                    open=row["open"],
+                    high=row["high"],
+                    low=row["low"],
+                    close=row["close"],
+                    volume=row["volume"],
+                )
+                db.merge(db_item)
+            db.commit()
+        finally:
+            db.close()
+
+        # ===== 5. 返回结果 =====
         result = [
             KlinePoint(
                 date=str(row["date"].date()),
@@ -317,9 +510,37 @@ def get_kline(
         set_cache(cache_key, result)
         return result
 
-    except Exception as e:
+    except Exception:
         traceback.print_exc()
-        raise HTTPException(500, str(e))
+
+        # ===== 兜底：数据库 =====
+        db = SessionLocal()
+        try:
+            items = (
+                db.query(KlineModel)
+                .filter_by(type=type, code=code)
+                .order_by(KlineModel.date.desc())
+                .limit(limit)
+                .all()
+            )
+        finally:
+            db.close()
+
+        if not items:
+            raise HTTPException(status_code=500, detail="no fallback kline")
+
+        # 注意：这里要反转一次，保证按日期升序返回
+        return [
+            KlinePoint(
+                date=str(i.date),
+                open=i.open,
+                high=i.high,
+                low=i.low,
+                close=i.close,
+                volume=i.volume,
+            )
+            for i in reversed(items)
+        ]
 
 
 # =====================================================================
@@ -327,4 +548,5 @@ def get_kline(
 # =====================================================================
 if __name__ == "__main__":
     import uvicorn
+
     uvicorn.run(app, host="0.0.0.0", port=8000)
