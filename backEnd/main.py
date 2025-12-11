@@ -109,35 +109,41 @@ def get_quote(
     type: str = Query("index"),
     codes: Optional[str] = None
 ):
-    cache_key = f"index_list_{codes}"
+    """
+    实时行情列表：
+    - type = index：预设 3 个指数（或前端传 codes）
+    - type = stock：预设 3 只股票（或前端传 codes）
+    """
+    cache_key = f"quote_list_{type}_{codes}"
     cached = get_cache(cache_key)
     if cached:
         return cached
 
+    # ====== 公共 DB 会话 ======
+    db = SessionLocal()
     try:
-        if type != "index":
-            raise HTTPException(status_code=400, detail="only index supported")
+        # ============================================================
+        # 1) 指数列表：新浪 stock_zh_index_spot_sina（基本不变）
+        # ============================================================
+        if type == "index":
+            df = ak.stock_zh_index_spot_sina()
+            if df is None or df.empty:
+                raise Exception("index source error")
 
-        df = ak.stock_zh_index_spot_sina()
-        if df is None or df.empty:
-            raise Exception("source error")
+            if codes:
+                codes_list = [c.strip() for c in codes.split(",") if c.strip()]
+            else:
+                # 默认 3 个：上证 / 深成 / 创业板
+                codes_list = ["000001", "399001", "399006"]
 
-        if codes:
-            codes_list = [c.strip() for c in codes.split(",") if c.strip()]
-        else:
-            codes_list = ["000001", "399001", "399006"]
+            symbols = [map_index_code_to_symbol(c) for c in codes_list]
+            df_sel = df[df["代码"].isin(symbols)]
 
-        symbols = [map_index_code_to_symbol(c) for c in codes_list]
-        df_sel = df[df["代码"].isin(symbols)]
+            if df_sel.empty:
+                raise Exception("no index rows after filter")
 
-        if df_sel.empty:
-            raise Exception("no index rows after filter")
+            result: List[Quote] = []
 
-        result: List[Quote] = []
-
-        # 一次性打开 DB 会话，不要在循环里面反复创建
-        db = SessionLocal()
-        try:
             for _, row in df_sel.iterrows():
                 pct = row["涨跌幅"]
                 if isinstance(pct, str):
@@ -163,26 +169,100 @@ def get_quote(
                 db.merge(db_item)
 
             db.commit()
-        finally:
-            db.close()
+            set_cache(cache_key, result)
+            return result
 
-        set_cache(cache_key, result)
-        return result
+        # ============================================================
+        # 2) 股票列表：雪球 stock_individual_spot_xq（循环 3 只预设）
+        # ============================================================
+        elif type == "stock":
+            # 预设 3 只股票：你可以按需改成自己想要的代码
+            if codes:
+                stock_codes = [c.strip() for c in codes.split(",") if c.strip()]
+            else:
+                stock_codes = ["300750", "601012", "688981"]  # 宁德时代 / 隆基绿能 / 中芯国际
+
+            result: List[Quote] = []
+
+            for c in stock_codes:
+                try:
+                    xq_symbol = map_stock_code_to_xq_symbol(c)
+                    df = ak.stock_individual_spot_xq(symbol=xq_symbol)
+                    if df is None or df.empty:
+                        # 单只失败就跳过，继续别的
+                        continue
+
+                    # df 为两列：item / value
+                    kv = {str(r["item"]).strip(): r["value"] for _, r in df.iterrows()}
+
+                    # 这里的 key 用调试过的中文字段
+                    name_raw = kv.get("名称")
+                    price_raw = kv.get("现价") or kv.get(" 现价")
+                    change_raw = kv.get("涨跌")
+                    pct_raw = kv.get("涨幅")
+
+                    if name_raw is None or price_raw is None or change_raw is None or pct_raw is None:
+                        continue
+
+                    name = str(name_raw)
+                    price = float(price_raw)
+                    change = float(change_raw)
+                    change_percent = float(str(pct_raw).replace("%", ""))
+
+                    q = Quote(
+                        code=c,
+                        name=name,
+                        price=price,
+                        change=change,
+                        change_percent=change_percent,
+                    )
+                    result.append(q)
+
+                    db_item = StockQuoteModel(
+                        code=c,
+                        name=name,
+                        price=price,
+                        change=change,
+                        change_percent=change_percent,
+                        updated_at=datetime.utcnow(),
+                    )
+                    db.merge(db_item)
+
+                except Exception:
+                    # 单票出错不影响其它票
+                    traceback.print_exc()
+                    continue
+
+            db.commit()
+
+            if not result:
+                raise Exception("no stock rows from xq")
+
+            set_cache(cache_key, result)
+            return result
+
+        # ============================================================
+        # 3) 其它 type 不支持
+        # ============================================================
+        else:
+            raise HTTPException(status_code=400, detail="only index or stock supported")
 
     except Exception:
         traceback.print_exc()
 
-        # ===== 兜底：数据库读取 =====
-        db = SessionLocal()
-        try:
+        # ====== 兜底：数据库读取 ======
+        if type == "index":
             items = db.query(IndexQuoteModel).all()
-        finally:
-            db.close()
+        elif type == "stock":
+            items = db.query(StockQuoteModel).all()
+        else:
+            items = []
 
         if not items:
-            raise HTTPException(status_code=500, detail="no index data")
+            db.close()
+            raise HTTPException(status_code=500, detail="no fallback data")
 
-        return [
+        fallback: List[Quote] = [
             Quote(
                 code=i.code,
                 name=i.name,
@@ -192,6 +272,9 @@ def get_quote(
             )
             for i in items
         ]
+        db.close()
+        set_cache(cache_key, fallback)
+        return fallback
 
 
 # =====================================================================
