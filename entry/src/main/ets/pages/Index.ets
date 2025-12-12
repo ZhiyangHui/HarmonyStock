@@ -115,7 +115,9 @@ struct HarmonyStockPage {
   private candleBodyWidth: number = 8;
   private candleGap: number = 4;
 
-  @State cardExpandedMap: Map<string, boolean> = new Map();
+  @State expandedKeys: string[] = [];
+  // 记录每张卡片是否展开：key = `${type}-${code}`
+  @State cardExpandedMap: Map<string, boolean> = new Map<string, boolean>();
 
 
   // ===== 自选 / 通知假数据（保持原样） =====
@@ -732,93 +734,85 @@ struct HarmonyStockPage {
     const key: string = `${item.type}-${item.code}`;
     const oldVal: boolean = this.cardExpandedMap.get(key) ?? false;
 
-    // 1. 先复制一份新的 Map
+    // 复制新 Map（触发 State 更新）
     const newMap: Map<string, boolean> = new Map<string, boolean>();
     this.cardExpandedMap.forEach((value: boolean, k: string) => {
       newMap.set(k, value);
     });
 
-    // 2. 修改新 Map
     newMap.set(key, !oldVal);
-
-    // 3. 整体替换 State，触发 UI 刷新
     this.cardExpandedMap = newMap;
   }
 
 
-  @Builder
-  private quoteCardInner(item: Quote, expanded: boolean) {
-    Column() {
-      Row() {
-        Text(item.name)
-          .fontSize(12)
-          .fontColor('#AAAAAA')
-
-        Text('✕')
-          .fontSize(12)
-          .fontColor('#777777')
-          .onClick(() => {
-            this.removeQuoteCard(item.code, item.type);
-          })
-      }
-      .width('100%')
-      .justifyContent(FlexAlign.SpaceBetween)
-      .alignItems(VerticalAlign.Center)
-
-      Text(item.price.toFixed(2))
-        .fontSize(expanded ? 28 : 20)
-        .fontWeight(FontWeight.Bold)
-        .fontColor(item.change >= 0 ? '#FF4D4F' : '#39D98A')
-        .margin({ top: 4 })
-
-      Text(`${item.change.toFixed(2)}  ${item.changePercent.toFixed(2)}%`)
-        .fontSize(expanded ? 16 : 12)
-        .fontColor(item.change >= 0 ? '#FF7875' : '#6BE49B')
-        .margin({ top: 4 })
-
-      // 右下角 + / -
-      Row() {
-        Blank()
-        Text(expanded ? '－' : '＋')
-          .fontSize(18)
-          .fontColor('#CCCCCC')
-          .onClick(() => {
-            // 不在 Builder 里声明变量，直接调用普通方法
-            this.toggleCardExpanded(item);
-          })
-      }
-      .width('100%')
-      .margin({ top: 8 })
-    }
-    .padding(expanded ? 20 : 12)
-    .backgroundColor('#171717')
-    .borderRadius(12)
-    .width(expanded ? 200 : 140)
-    .height(expanded ? 150 : undefined)
-  }
 
 
   // ===== 行情卡片（指数 / 股票通用） =====
   @Builder
-  @Builder
   private buildQuoteCard(item: Quote) {
     Column() {
-      // 这里也不能写 const/let，只能直接 inline 表达式
-      this.quoteCardInner(
-        item,
-        this.cardExpandedMap.get(`${item.type}-${item.code}`) ?? false
-      )
+      // 直接 inline 取 expanded，避免 Builder 内 const/let
+      // expanded = this.cardExpandedMap.get(`${item.type}-${item.code}`) ?? false
+
+      Column() {
+        // ===== 卡片主体：点这里才选中 + 拉 K 线 =====
+        Column() {
+          Row() {
+            Text(item.name)
+              .fontSize(12)
+              .fontColor('#AAAAAA')
+
+            Text('✕')
+              .fontSize(12)
+              .fontColor('#777777')
+              .onClick(() => {
+                this.removeQuoteCard(item.code, item.type);
+              })
+          }
+          .width('100%')
+          .justifyContent(FlexAlign.SpaceBetween)
+          .alignItems(VerticalAlign.Center)
+
+          Text(item.price.toFixed(2))
+            .fontSize((this.cardExpandedMap.get(`${item.type}-${item.code}`) ?? false) ? 28 : 20)
+            .fontWeight(FontWeight.Bold)
+            .fontColor(item.change >= 0 ? '#FF4D4F' : '#39D98A')
+            .margin({ top: 4 })
+
+          Text(`${item.change.toFixed(2)}  ${item.changePercent.toFixed(2)}%`)
+            .fontSize((this.cardExpandedMap.get(`${item.type}-${item.code}`) ?? false) ? 16 : 12)
+            .fontColor(item.change >= 0 ? '#FF7875' : '#6BE49B')
+            .margin({ top: 4 })
+        }
+        .onClick(() => {
+          this.selectedQuoteCode = item.code;
+          this.selectedQuoteName = item.name;
+          this.selectedQuoteType = item.type;
+          const period: string = this.getKlinePeriodParam();
+          this.fetchKline(item.type, item.code, period);
+        })
+
+        // ===== 右下角 +/-：只负责展开收起 =====
+        Row() {
+          Blank()
+          Text((this.cardExpandedMap.get(`${item.type}-${item.code}`) ?? false) ? '－' : '＋')
+            .fontSize(18)
+            .fontColor('#CCCCCC')
+            .onClick(() => {
+              this.toggleCardExpanded(item);
+            })
+        }
+        .width('100%')
+        .margin({ top: 8 })
+      }
+      .padding((this.cardExpandedMap.get(`${item.type}-${item.code}`) ?? false) ? 20 : 12)
+      .backgroundColor('#171717')
+      .borderRadius(12)
+      .width((this.cardExpandedMap.get(`${item.type}-${item.code}`) ?? false) ? 200 : 140)
+      .height((this.cardExpandedMap.get(`${item.type}-${item.code}`) ?? false) ? 150 : undefined)
     }
-    .padding(0) // 内边距在 quoteCardInner 里已经处理了，这里给个 0 即可
-    .onClick(() => {
-      // 选中标的 + 拉取 K 线的逻辑保持不变
-      this.selectedQuoteCode = item.code;
-      this.selectedQuoteName = item.name;
-      this.selectedQuoteType = item.type;
-      const period: string = this.getKlinePeriodParam();
-      this.fetchKline(item.type, item.code, period);
-    })
   }
+
 
 
   // ===== K 线卡片 =====
