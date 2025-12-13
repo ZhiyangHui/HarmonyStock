@@ -103,6 +103,11 @@ struct HarmonyStockPage {
   @State klineMaxPrice: number = 0;
   @State klineXLabels: string[] = [];
 
+  private readonly KLINE_PLOT_H: number = 180;     // 蜡烛绘图区高度（计算 + 渲染统一）
+  private readonly KLINE_LABEL_H: number = 24;     // x轴标签区域高度
+  private readonly KLINE_CARD_INNER_PAD: number = 16;
+
+
   // 当前选中的 K 线（用于显示详细信息条 + 高亮）
   @State selectedKlineIndex: number = -1;
   @State selectedKlineDate: string = '';
@@ -118,6 +123,9 @@ struct HarmonyStockPage {
   @State expandedKeys: string[] = [];
   // 记录每张卡片是否展开：key = `${type}-${code}`
   @State cardExpandedMap: Map<string, boolean> = new Map<string, boolean>();
+
+  private readonly HTTP_CONNECT_TIMEOUT: number = 55000; // 35s
+  private readonly HTTP_READ_TIMEOUT: number = 55000;    // 35s
 
 
   // ===== 自选 / 通知假数据（保持原样） =====
@@ -185,9 +193,10 @@ struct HarmonyStockPage {
 
       const res = await httpRequest.request(url, {
         method: http.RequestMethod.GET,
-        connectTimeout: 5000,
-        readTimeout: 5000
+        connectTimeout: this.HTTP_CONNECT_TIMEOUT,
+        readTimeout: this.HTTP_READ_TIMEOUT
       });
+
 
       if (res.responseCode === 200 && res.result) {
         const raw: BackendQuote[] =
@@ -237,9 +246,10 @@ struct HarmonyStockPage {
 
       const res = await httpRequest.request(url, {
         method: http.RequestMethod.GET,
-        connectTimeout: 5000,
-        readTimeout: 5000
+        connectTimeout: this.HTTP_CONNECT_TIMEOUT,
+        readTimeout: this.HTTP_READ_TIMEOUT
       });
+
 
       if (res.responseCode === 200 && res.result) {
         const raw: KLinePoint[] =
@@ -298,9 +308,10 @@ struct HarmonyStockPage {
       return;
     }
 
-    // 1. 找最高价 / 最低价
+    // 1) 找最高价 / 最低价
     let minPrice: number = points[0].low;
     let maxPrice: number = points[0].high;
+
     for (let i: number = 1; i < points.length; i++) {
       const p: KLinePoint = points[i];
       if (p.low < minPrice) {
@@ -310,66 +321,115 @@ struct HarmonyStockPage {
         maxPrice = p.high;
       }
     }
-    if (maxPrice <= minPrice) {
-      maxPrice = minPrice + 1.0;
+
+    // range 防御
+    let range: number = maxPrice - minPrice;
+    if (range <= 0) {
+      range = 1.0;
+      maxPrice = minPrice + range;
     }
+
     this.klineMinPrice = minPrice;
     this.klineMaxPrice = maxPrice;
 
-    const range: number = maxPrice - minPrice;
+    // 2) 绘图区高度统一使用常量（必须和 UI 的蜡烛区域 .height 一致）
+    const fullHeight: number = this.KLINE_PLOT_H;
 
-    // 整个绘图区高度
-    const fullHeight: number = 120;
-    const maxBodyHeight: number = 60;
-    const maxWickHeight: number = 40;
+    // 最小可见高度（防止“十字线”看不到）
+    const minBody: number = 4;
+    const minWick: number = 2;
 
-    // 2. 逐个点算出蜡烛的几何信息
+    // 价格 -> y 坐标（0 顶部，fullHeight 底部）
+    const priceToY = (price: number): number => {
+      const y: number = (maxPrice - price) / range * fullHeight;
+      if (y < 0) {
+        return 0;
+      }
+      if (y > fullHeight) {
+        return fullHeight;
+      }
+      return y;
+    };
+
+    // 3) 逐个点算几何
     for (let i: number = 0; i < points.length; i++) {
       const pt: KLinePoint = points[i];
 
-      // 上下影线总高度
-      const span: number = pt.high - pt.low;
-      let wickTotal: number = span / range * maxWickHeight;
-      if (wickTotal < 4) {
-        wickTotal = 4;
+      // 将关键价格映射到 y
+      const yHigh: number = priceToY(pt.high);
+      const yLow: number = priceToY(pt.low);
+      const yOpen: number = priceToY(pt.open);
+      const yClose: number = priceToY(pt.close);
+
+      // 实体上下边界
+      let yTopBody: number = Math.min(yOpen, yClose);
+      let yBottomBody: number = Math.max(yOpen, yClose);
+
+      // 实体最小高度保证
+      if (yBottomBody - yTopBody < minBody) {
+        const mid: number = (yTopBody + yBottomBody) / 2.0;
+        yTopBody = mid - minBody / 2.0;
+        yBottomBody = mid + minBody / 2.0;
+
+        // 裁剪到绘图区范围
+        if (yTopBody < 0) {
+          yTopBody = 0;
+          yBottomBody = minBody;
+        }
+        if (yBottomBody > fullHeight) {
+          yBottomBody = fullHeight;
+          yTopBody = fullHeight - minBody;
+        }
       }
-      const upperWick: number = wickTotal / 2.0;
-      const lowerWick: number = wickTotal / 2.0;
 
-      // 实体高度
-      const diff: number = Math.abs(pt.close - pt.open);
-      let bodyHeight: number = diff / range * maxBodyHeight;
-      if (bodyHeight < 4) {
-        bodyHeight = 4;
+      // 上影线：high -> 实体上边
+      let upperWick: number = yTopBody - yHigh;
+      if (upperWick < minWick) {
+        upperWick = minWick;
       }
 
-      // 中点价决定整体位置
-      const midPrice: number = (pt.high + pt.low) / 2.0;
-      const ratio: number = (maxPrice - midPrice) / range;  // 0~1，越大越靠上
+      // 下影线：实体下边 -> low
+      let lowerWick: number = yLow - yBottomBody;
+      if (lowerWick < minWick) {
+        lowerWick = minWick;
+      }
 
-      let topGap: number = ratio * (fullHeight - wickTotal - bodyHeight);
+      // 顶部空白 = yHigh
+      let topGap: number = yHigh;
       if (topGap < 0) {
         topGap = 0;
       }
+      if (topGap > fullHeight) {
+        topGap = fullHeight;
+      }
 
-      const geom: KlineGeom = {
+      // 额外防御：避免 topGap + wick + body 超出容器导致溢出
+      // 如果确实溢出，优先压缩 topGap（不动实体/影线）
+      const totalH: number = topGap + upperWick + (yBottomBody - yTopBody) + lowerWick;
+      if (totalH > fullHeight) {
+        const overflow: number = totalH - fullHeight;
+        topGap = topGap - overflow;
+        if (topGap < 0) {
+          topGap = 0;
+        }
+      }
+
+      geoms.push({
         upperWick: upperWick,
-        bodyHeight: bodyHeight,
+        bodyHeight: (yBottomBody - yTopBody),
         lowerWick: lowerWick,
         topGap: topGap,
         isUp: pt.close >= pt.open
-      };
-      geoms.push(geom);
+      });
     }
 
-    // 3. x 轴标签：最多取 5 个点，均匀分布在头到尾之间
+    // 4) x 轴标签：最多 5 个，均匀取样
     const total: number = points.length;
     const maxLabels: number = 5;
     const actualLabels: number = total >= maxLabels ? maxLabels : total;
 
     if (actualLabels > 0) {
       const lastIndex: number = total - 1;
-
       for (let i: number = 0; i < actualLabels; i++) {
         let idx: number;
         if (actualLabels === 1) {
@@ -387,6 +447,7 @@ struct HarmonyStockPage {
     this.klineGeoms = geoms;
     this.klineXLabels = labels;
   }
+
 
   // ===== 选中某一根 K 线 =====
   private onKlineSelected(index: number): void {
@@ -444,9 +505,10 @@ struct HarmonyStockPage {
 
       const res = await httpRequest.request(url, {
         method: http.RequestMethod.GET,
-        connectTimeout: 5000,
-        readTimeout: 5000
+        connectTimeout: this.HTTP_CONNECT_TIMEOUT,
+        readTimeout: this.HTTP_READ_TIMEOUT
       });
+
 
       if (res.responseCode === 200 && res.result) {
         const backendItem: BackendQuote =
@@ -897,7 +959,7 @@ struct HarmonyStockPage {
                   .fontColor('#777777')
               }
               .width(40)
-              .height(120)
+              .height(this.KLINE_PLOT_H)
               .justifyContent(FlexAlign.SpaceBetween)
 
               // 右侧：K 线 + x 轴一起横向滚动
@@ -936,7 +998,7 @@ struct HarmonyStockPage {
                     }, (g: KlineGeom, idx: number) => `${idx}`)
                   }
                   .width(this.getKlineTotalWidth())
-                  .height(120)
+                  .height(this.KLINE_PLOT_H)
 
                   // x 轴日期标签
                   if (this.klineXLabels.length > 0) {
@@ -955,7 +1017,7 @@ struct HarmonyStockPage {
                 .padding({ right: 32 })
               }
               .scrollable(ScrollDirection.Horizontal)
-              .height(140)
+              .height(this.KLINE_PLOT_H + this.KLINE_LABEL_H)
               .margin({ left: 8 })
             }
             .width('100%')
@@ -963,7 +1025,7 @@ struct HarmonyStockPage {
         }
       }
       .width('100%')
-      .height(160)
+      .height(this.KLINE_PLOT_H + this.KLINE_LABEL_H + 70)
       .margin({ top: 8, bottom: 12 })
       .padding(16)
       .backgroundColor('#101010')

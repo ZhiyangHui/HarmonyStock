@@ -52,8 +52,8 @@ STOCK_SPOT_CACHE = {
 STOCK_FAIL_COOLDOWN = 10  # 秒：失败后10秒内不再疯狂重试
 
 # 缓存时间（秒）
-INDEX_SPOT_TTL = 30   # 指数：轻接口，10 秒足够
-STOCK_SPOT_TTL = 30   # 股票：重接口，必须缓存
+INDEX_SPOT_TTL = 30   # 指数：轻接口，30 秒足够
+STOCK_SPOT_TTL = 50   # 股票：重接口，必须缓存
 
 STOCK_ROW_MAP = {
     "map": None,   # dict[str, dict] 或 dict[str, Any]
