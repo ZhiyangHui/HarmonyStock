@@ -1,6 +1,7 @@
 // entry/src/main/ets/pages/Index.ets
 import { TabBarOptions } from '@kit.ArkUI';
 import http from '@ohos.net.http';
+import preferences from '@ohos.data.preferences';
 
 // ====== 通用行情结构（指数 / 股票） ======
 interface Quote {
@@ -29,12 +30,6 @@ interface StockQuote {
   changePercent: number;
 }
 
-interface StockGroup {
-  id: number;
-  name: string;
-  stocks: StockQuote[];
-}
-
 interface NotifyRule {
   id: number;
   stockCode: string;
@@ -60,6 +55,35 @@ interface KlineGeom {
   topGap: number;      // 整根蜡烛距离顶部的空白
   isUp: boolean;       // 是否上涨（close >= open）
 }
+
+
+interface StockRef {
+  code: string;      // 6 位
+  name?: string;     // 可选：第一次加入时填；后续可由后端 quote 补全
+}
+
+interface StockGroup {
+  id: number;        // 本地自增 id
+  name: string;      // 分组名
+  stocks: StockRef[];// 只存 code 为主
+  createdAt: number; // 时间戳
+}
+
+interface GroupStats {
+  groupId: number;
+  stockCount: number;
+  upCount: number;        // 当日上涨数量（需要行情数据）
+  downCount: number;      // 当日下跌数量
+  avgChangePercent: number; // 平均涨跌幅（需要行情数据）
+}
+
+interface ActiveGroupStats {
+  stockCount: string;
+  up: string;
+  down: string;
+  avgPct: string;
+}
+
 
 // ====== 页面组件 ======
 @Entry
@@ -124,26 +148,51 @@ struct HarmonyStockPage {
   // 记录每张卡片是否展开：key = `${type}-${code}`
   @State cardExpandedMap: Map<string, boolean> = new Map<string, boolean>();
 
-  private readonly HTTP_CONNECT_TIMEOUT: number = 55000; // 35s
-  private readonly HTTP_READ_TIMEOUT: number = 55000;    // 35s
+  private readonly HTTP_CONNECT_TIMEOUT: number = 55000; // 55s
+  private readonly HTTP_READ_TIMEOUT: number = 55000;    // 55s
+
+  private readonly PREF_FILE: string = 'harmonystock_watchlist';
+  private readonly PREF_KEY_GROUPS: string = 'groups_json';
+  private nextGroupId: number = 1;
+
+  @State activeGroupId: number = -1; // 当前选中的分组
+  @State watchlistMsg: string = '';
+  @State newGroupName: string = '';
+  @State addStockCodeInput: string = '';
+
+
+  @State activeGroupName: string = ''
+  @State activeGroupStocks: StockRef[] = []
+
+  @State activeGroupStockCountText: string = '0'
+  @State activeGroupUpCountText: string = '0'
+  @State activeGroupDownCountText: string = '0'
+  @State activeGroupAvgPctText: string = '--'
+
+  @State quoteCache: Map<string, Quote> = new Map<string, Quote>();
+
+
+
 
 
   // ===== 自选 / 通知假数据（保持原样） =====
-  private groups: StockGroup[] = [
+  @State groups: StockGroup[] = [
     {
       id: 1,
       name: '科技股',
       stocks: [
-        { name: '宁德时代', code: '300750', price: 210.35, change: -1.25, changePercent: -0.59 },
-        { name: '中芯国际', code: '688981', price: 58.20, change: 0.60, changePercent: 1.04 }
-      ]
+        { name: '宁德时代', code: '300750' },
+        { name: '中芯国际', code: '688981' }
+      ],
+      createdAt: Date.now()
     },
     {
       id: 2,
       name: '新能源',
       stocks: [
-        { name: '隆基绿能', code: '601012', price: 32.10, change: 0.35, changePercent: 1.10 }
-      ]
+        { name: '隆基绿能', code: '601012' }
+      ],
+      createdAt: Date.now()
     }
   ];
 
@@ -178,9 +227,15 @@ struct HarmonyStockPage {
 
   // ===== 页面生命周期 =====
   aboutToAppear() {
-    // 默认先加载“指数模式”的行情
+    this.loadGroupsFromPrefs();
+
+    // 市场页按当前模式拉
     this.fetchQuotes(this.currentMode);
+
+    // ✅ 自选页依赖 stock 缓存：额外拉一次 stock（不影响 currentMode）
+    this.fetchQuotes('stock');
   }
+
 
   // ===== 拉取行情列表（指数 / 股票共用） =====
   private async fetchQuotes(type: 'index' | 'stock'): Promise<void> {
@@ -202,9 +257,16 @@ struct HarmonyStockPage {
         const raw: BackendQuote[] =
           JSON.parse(res.result as string) as BackendQuote[];
 
-        this.marketQuotes = raw.map((it: BackendQuote): Quote =>
+        const mapped: Quote[] = raw.map((it: BackendQuote): Quote =>
         this.mapBackendQuote(it, type)
         );
+        this.marketQuotes = mapped;
+
+        // ✅ 关键：写入“长期缓存”，不随模式切换丢失
+        this.mergeQuotesToCache(mapped);
+
+        // ✅ 缓存更新后刷新自选统计
+        this.refreshActiveGroupView();
 
         // 如果当前没有选中任何标的，则默认选第一只
         if (this.selectedQuoteCode === '' && this.marketQuotes.length > 0) {
@@ -487,9 +549,9 @@ struct HarmonyStockPage {
 
   // ===== 根据代码查询单个标的（指数 / 股票通用） =====
   private async queryQuoteByCode(): Promise<void> {
-    const code: string = this.searchCode;
+    const code: string = this.searchCode.trim();
 
-    if (!code || code.length !== 6) {
+    if (code.length !== 6) {
       this.searchError = '请输入 6 位代码';
       return;
     }
@@ -509,13 +571,14 @@ struct HarmonyStockPage {
         readTimeout: this.HTTP_READ_TIMEOUT
       });
 
-
       if (res.responseCode === 200 && res.result) {
-        const backendItem: BackendQuote =
-          JSON.parse(res.result as string) as BackendQuote;
-
+        const backendItem: BackendQuote = JSON.parse(res.result as string) as BackendQuote;
         const newItem: Quote = this.mapBackendQuote(backendItem, type);
 
+        // ✅ 1) 永久缓存（关键：不随 marketQuotes 被覆盖）
+        this.mergeQuotesToCache([newItem]);
+
+        // ✅ 2) 搜索 strip 仍然展示（保持你原逻辑）
         const existsInSearched: boolean = this.searchedQuotes.some(
           (it: Quote) => it.code === newItem.code && it.type === newItem.type
         );
@@ -524,12 +587,12 @@ struct HarmonyStockPage {
         );
 
         if (!existsInSearched && !existsInMarket) {
-          const copy: Quote[] = [newItem];
-          for (let i: number = 0; i < this.searchedQuotes.length; i++) {
-            copy.push(this.searchedQuotes[i]);
-          }
+          const copy: Quote[] = [newItem, ...this.searchedQuotes];
           this.searchedQuotes = copy;
         }
+
+        // ✅ 3) 刷新自选页（行/统计从缓存取值）
+        this.refreshActiveGroupView();
       } else if (res.responseCode === 404) {
         this.searchError = '未找到该代码';
       } else {
@@ -551,6 +614,425 @@ struct HarmonyStockPage {
     }
     return count * this.candleBodyWidth + (count - 1) * this.candleGap;
   }
+
+  private async loadGroupsFromPrefs(): Promise<void> {
+    const pref = await preferences.getPreferences(getContext(this), this.PREF_FILE);
+    const jsonStr: string = (await pref.get(this.PREF_KEY_GROUPS, '')) as string;
+
+    if (jsonStr.trim().length === 0) {
+      const g: StockGroup = { id: 1, name: '默认分组', stocks: [], createdAt: Date.now() };
+      this.groups = [g];
+      this.activeGroupId = 1;
+      this.nextGroupId = 2;
+      await this.saveGroupsToPrefs();
+      this.refreshActiveGroupView();   // ✅ 加这一句
+      return;
+    }
+
+    const parsed: StockGroup[] = this.safeParseGroups(jsonStr);
+    this.groups = parsed;
+
+    let maxId: number = 0;
+    for (let i: number = 0; i < parsed.length; i++) {
+      if (parsed[i].id > maxId) maxId = parsed[i].id;
+    }
+    this.nextGroupId = maxId + 1;
+
+    this.activeGroupId = parsed.length > 0 ? parsed[0].id : -1;
+
+    this.refreshActiveGroupView();     // ✅ 加这一句（放在 activeGroupId 之后）
+  }
+
+  private async saveGroupsToPrefs(): Promise<void> {
+    const pref = await preferences.getPreferences(getContext(this), this.PREF_FILE);
+    const jsonStr: string = JSON.stringify(this.groups);
+    await pref.put(this.PREF_KEY_GROUPS, jsonStr);
+    await pref.flush();
+  }
+
+  // 不用 any/unknown：对结构做兜底校验
+  private safeParseGroups(jsonStr: string): StockGroup[] {
+    try {
+      const rawObj: Object = JSON.parse(jsonStr) as Object;
+      if (!Array.isArray(rawObj)) {
+        return [];
+      }
+
+      const arr: Object[] = rawObj as Object[];
+      const result: StockGroup[] = [];
+
+      for (let i: number = 0; i < arr.length; i++) {
+        const item: Record<string, Object> = arr[i] as Record<string, Object>;
+
+        const id: number = Number(item['id']);
+        const name: string = String(item['name'] ?? '');
+        const createdAt: number = Number(item['createdAt'] ?? Date.now());
+
+        const stocksRaw: Object = item['stocks'] ?? [];
+        const stocks: StockRef[] = [];
+
+        if (Array.isArray(stocksRaw)) {
+          const sr: Object[] = stocksRaw as Object[];
+          for (let j: number = 0; j < sr.length; j++) {
+            const s: Record<string, Object> = sr[j] as Record<string, Object>;
+            const code: string = String(s['code'] ?? '').trim();
+            if (code.length === 6) {
+              const ref: StockRef = { code: code };
+              const nm: string = String(s['name'] ?? '').trim();
+              if (nm.length > 0) {
+                ref.name = nm;
+              }
+              stocks.push(ref);
+            }
+          }
+        }
+
+        if (!Number.isNaN(id) && name.length > 0) {
+          result.push({ id, name, stocks, createdAt });
+        }
+      }
+      return result;
+    } catch (e) {
+      return [];
+    }
+  }
+
+  private findGroupIndex(groupId: number): number {
+    for (let i: number = 0; i < this.groups.length; i++) {
+      if (this.groups[i].id === groupId) {
+        return i;
+      }
+    }
+    return -1;
+  }
+
+  private async createGroup(name: string): Promise<void> {
+    const n: string = name.trim();
+    if (n.length === 0) return;
+
+    const g: StockGroup = { id: this.nextGroupId, name: n, stocks: [], createdAt: Date.now() };
+    this.nextGroupId += 1;
+
+    const copy: StockGroup[] = [g, ...this.groups];
+    this.groups = copy;
+    this.activeGroupId = g.id;
+
+    await this.saveGroupsToPrefs();
+    this.refreshActiveGroupView(); // ✅
+  }
+
+  private async deleteGroup(groupId: number): Promise<void> {
+    const copy: StockGroup[] = [];
+    for (let i: number = 0; i < this.groups.length; i++) {
+      if (this.groups[i].id !== groupId) copy.push(this.groups[i]);
+    }
+    this.groups = copy;
+
+    if (this.activeGroupId === groupId) {
+      this.activeGroupId = this.groups.length > 0 ? this.groups[0].id : -1;
+    }
+
+    await this.saveGroupsToPrefs();
+    this.refreshActiveGroupView(); // ✅
+  }
+
+  private async addStocksToGroup(groupId: number, codes: string[]): Promise<void> {
+    const idx: number = this.findGroupIndex(groupId);
+    if (idx < 0) return;
+
+    const existing: Set<string> = new Set<string>();
+    for (let i: number = 0; i < this.groups[idx].stocks.length; i++) {
+      existing.add(this.groups[idx].stocks[i].code);
+    }
+
+    const addList: StockRef[] = [];
+    for (let i: number = 0; i < codes.length; i++) {
+      const code6: string = codes[i].trim();
+      if (code6.length !== 6) continue;
+      if (!existing.has(code6)) {
+        existing.add(code6);
+        addList.push({ code: code6 });
+      }
+    }
+    if (addList.length === 0) return;
+
+    const newGroups: StockGroup[] = this.groups.slice();
+    const g: StockGroup = newGroups[idx];
+    const newStocks: StockRef[] = g.stocks.concat(addList);
+    newGroups[idx] = this.cloneGroupWithStocks(g, newStocks);
+    this.groups = newGroups;
+
+    // ✅ 重要：改完 groups 立刻刷新（至少股票数会立刻变）
+    if (this.activeGroupId === groupId) {
+      this.refreshActiveGroupView();
+    }
+
+    await this.saveGroupsToPrefs();
+  }
+
+  private async removeStocksFromGroup(groupId: number, codes: string[]): Promise<void> {
+    const idx: number = this.findGroupIndex(groupId);
+    if (idx < 0) return;
+
+    const toRemove: Set<string> = new Set<string>();
+    for (let i: number = 0; i < codes.length; i++) {
+      const code6: string = codes[i].trim();
+      if (code6.length === 6) toRemove.add(code6);
+    }
+
+    const oldStocks: StockRef[] = this.groups[idx].stocks;
+    const newStocks: StockRef[] = [];
+    for (let i: number = 0; i < oldStocks.length; i++) {
+      if (!toRemove.has(oldStocks[i].code)) newStocks.push(oldStocks[i]);
+    }
+
+    const newGroups: StockGroup[] = this.groups.slice();
+    const g: StockGroup = newGroups[idx];
+    newGroups[idx] = this.cloneGroupWithStocks(g, newStocks);
+    this.groups = newGroups;
+
+    // ✅ 重要：改完 groups 立刻刷新
+    if (this.activeGroupId === groupId) {
+      this.refreshActiveGroupView();
+    }
+
+    await this.saveGroupsToPrefs();
+  }
+
+
+  private cloneGroupWithStocks(g: StockGroup, stocks: StockRef[]): StockGroup {
+    return {
+      id: g.id,
+      name: g.name,
+      stocks: stocks,
+      createdAt: g.createdAt
+    };
+  }
+
+  private getActiveGroup(): StockGroup | null {
+    if (this.activeGroupId < 0) {
+      return null;
+    }
+    const idx: number = this.findGroupIndex(this.activeGroupId);
+    if (idx < 0) {
+      return null;
+    }
+    return this.groups[idx];
+  }
+
+  private findQuoteInCaches(code: string): Quote | null {
+    const code6: string = code.trim();
+    if (code6.length !== 6) return null;
+
+    const kStock: string = `stock-${code6}`;
+    const vStock: Quote | undefined = this.quoteCache.get(kStock);
+    if (vStock !== undefined) return vStock;
+
+    const kIndex: string = `index-${code6}`;
+    const vIndex: Quote | undefined = this.quoteCache.get(kIndex);
+    if (vIndex !== undefined) return vIndex;
+
+    return null;
+  }
+
+  private refreshActiveGroupView(): void {
+    // 1) active group 基础数据
+    const idx: number = this.findGroupIndex(this.activeGroupId)
+    if (idx < 0) {
+      this.activeGroupName = ''
+      this.activeGroupStocks = []
+      this.activeGroupStockCountText = '0'
+      this.activeGroupUpCountText = '0'
+      this.activeGroupDownCountText = '0'
+      this.activeGroupAvgPctText = '--'
+      return
+    }
+
+    const g: StockGroup = this.groups[idx]
+    this.activeGroupName = g.name
+    this.activeGroupStocks = g.stocks
+
+    // 2) 统计（用行情缓存补全）
+    let up: number = 0
+    let down: number = 0
+    let sumPct: number = 0
+    let cntPct: number = 0
+
+    for (let i: number = 0; i < g.stocks.length; i++) {
+      const code: string = g.stocks[i].code
+      const q: Quote | null = this.findQuoteInCaches(code)
+      if (q !== null) {
+        if (q.change >= 0) {
+          up += 1
+        } else {
+          down += 1
+        }
+        sumPct += q.changePercent
+        cntPct += 1
+      }
+    }
+
+    this.activeGroupStockCountText = g.stocks.length.toString()
+    this.activeGroupUpCountText = up.toString()
+    this.activeGroupDownCountText = down.toString()
+    this.activeGroupAvgPctText = (cntPct > 0) ? ((sumPct / cntPct).toFixed(2) + '%') : '--'
+
+    // ✅ 关键
+    this.recomputeActiveGroupStats();
+  }
+
+  private getStockRowName(s: StockRef): string {
+    const q: Quote | null = this.findQuoteInCaches(s.code);
+    if (q !== null) {
+      return q.name;
+    }
+    if (s.name && s.name.length > 0) {
+      return s.name;
+    }
+    return '—';
+  }
+
+  private getStockRowPriceText(s: StockRef): string {
+    const q: Quote | null = this.findQuoteInCaches(s.code);
+    return (q !== null) ? q.price.toFixed(2) : '--';
+  }
+
+  private getStockRowChangeText(s: StockRef): string {
+    const q: Quote | null = this.findQuoteInCaches(s.code);
+    return (q !== null) ? q.change.toFixed(2) : '--';
+  }
+
+  private getStockRowPctText(s: StockRef): string {
+    const q: Quote | null = this.findQuoteInCaches(s.code);
+    return (q !== null) ? (q.changePercent.toFixed(2) + '%') : '--';
+  }
+
+  private getStockRowPriceColor(s: StockRef): string {
+    const q: Quote | null = this.findQuoteInCaches(s.code);
+    if (q === null) {
+      return '#AAAAAA';
+    }
+    return (q.change >= 0) ? '#FF4D4F' : '#39D98A';
+  }
+
+  private getStockRowSubColor(s: StockRef): string {
+    const q: Quote | null = this.findQuoteInCaches(s.code);
+    if (q === null) {
+      return '#777777';
+    }
+    return (q.change >= 0) ? '#FF7875' : '#6BE49B';
+  }
+
+  private async ensureQuoteCachedForCode(code: string): Promise<void> {
+    const code6: string = code.trim();
+    if (code6.length !== 6) {
+      return;
+    }
+
+    // 如果缓存里已有，就不用再请求
+    const existing: Quote | null = this.findQuoteInCaches(code6);
+    if (existing !== null) {
+      return;
+    }
+
+    const httpRequest = http.createHttp();
+    try {
+      // ✅ 自选分组是股票：这里固定用 stock
+      const url: string =
+        `http://101.43.185.73:8000/api/quote/by_code?type=stock&code=${code6}`;
+
+      const res = await httpRequest.request(url, {
+        method: http.RequestMethod.GET,
+        connectTimeout: this.HTTP_CONNECT_TIMEOUT,
+        readTimeout: this.HTTP_READ_TIMEOUT
+      });
+
+      if (res.responseCode === 200 && res.result) {
+        const backendItem: BackendQuote = JSON.parse(res.result as string) as BackendQuote;
+        const q: Quote = this.mapBackendQuote(backendItem, 'stock');
+
+        // 插入到 searchedQuotes（触发 UI）
+        const copy: Quote[] = [q];
+        for (let i: number = 0; i < this.searchedQuotes.length; i++) {
+          copy.push(this.searchedQuotes[i]);
+        }
+        this.searchedQuotes = copy;
+
+        // 行情到达后，刷新统计
+        this.refreshActiveGroupView();
+      } else {
+        // 404 / 其他错误：不塞缓存
+      }
+    } catch (e) {
+      // 网络错误：不塞缓存
+    } finally {
+      httpRequest.destroy();
+    }
+  }
+
+  private async preloadActiveGroupQuotes(): Promise<void> {
+    const g: StockGroup | null = this.getActiveGroup();
+    if (g === null) {
+      return;
+    }
+
+    const tasks: Promise<void>[] = [];
+    for (let i: number = 0; i < g.stocks.length; i++) {
+      const code: string = g.stocks[i].code;
+      tasks.push(this.ensureQuoteCachedForCode(code));
+    }
+
+    // 并行预热：单只失败不会阻塞整体
+    await Promise.all(tasks.map((p: Promise<void>) => p.catch(() => { })));
+  }
+
+  private mergeQuotesToCache(list: Quote[]): void {
+    const newMap: Map<string, Quote> = new Map<string, Quote>();
+    this.quoteCache.forEach((v: Quote, k: string) => {
+      newMap.set(k, v);
+    });
+
+    for (let i: number = 0; i < list.length; i++) {
+      const q: Quote = list[i];
+      const key: string = `${q.type}-${q.code}`;
+      newMap.set(key, q);
+    }
+
+    this.quoteCache = newMap;
+  }
+
+
+  private recomputeActiveGroupStats(): void {
+    const stockCount: number = this.activeGroupStocks.length;
+
+    let up: number = 0;
+    let down: number = 0;
+    let sumPct: number = 0;
+    let cntPct: number = 0;
+
+    for (let i: number = 0; i < this.activeGroupStocks.length; i++) {
+      const code: string = this.activeGroupStocks[i].code;
+      const q: Quote | null = this.findQuoteInCaches(code);
+      if (q !== null) {
+        if (q.change >= 0) {
+          up += 1;
+        } else {
+          down += 1;
+        }
+        sumPct += q.changePercent;
+        cntPct += 1;
+      }
+    }
+
+    this.activeGroupStockCountText = stockCount.toString();
+    this.activeGroupUpCountText = up.toString();
+    this.activeGroupDownCountText = down.toString();
+    this.activeGroupAvgPctText =
+      cntPct > 0 ? ((sumPct / cntPct).toFixed(2) + '%') : '--';
+  }
+
+
+
 
   // ===== 自定义 TabBar：这里就能完全控制文字颜色 =====
   @Builder
@@ -596,6 +1078,11 @@ struct HarmonyStockPage {
       })
       .onChange((index: number) => {
         this.currentTabIndex = index;
+
+        // ✅ 切到自选页：立即预热当前分组行情，避免 -- 卡死
+        if (index === 1) {
+          this.preloadActiveGroupQuotes();
+        }
       })
     }
     .width('100%')
@@ -1122,56 +1609,263 @@ struct HarmonyStockPage {
   @Builder
   private buildWatchlistTab() {
     Column() {
-      Scroll() {
-        Row({ space: 8 }) {
-          ForEach(this.groups, (group: StockGroup) => {
-            Column() {
-              Text(group.name)
-                .fontSize(12)
-                .fontColor('#DDDDDD')
-            }
-            .padding({ left: 12, right: 12, top: 6, bottom: 6 })
-            .backgroundColor('#161616')
-            .borderRadius(12)
-          }, (group: StockGroup) => group.id.toString())
-        }
-        .padding({ left: 16, right: 16, top: 12, bottom: 8 })
-      }.scrollable(ScrollDirection.Horizontal)
+      this.buildGroupStrip()
+      this.buildCreateGroupBar()
 
-      if (this.groups.length > 0) {
-        Column() {
-          Row() {
-            Text(this.groups[0].name)
-              .fontSize(14)
-              .fontColor('#FFFFFF')
-            Blank()
-            Text('组内统计（占位）')
-              .fontSize(11)
-              .fontColor('#777777')
-          }
+      if (this.watchlistMsg.length > 0) {
+        Text(this.watchlistMsg)
+          .fontSize(10)
+          .fontColor('#777777')
+          .margin({ left: 16, bottom: 8 })
+      }
+
+      if (this.activeGroupId < 0 || this.groups.length === 0) {
+        Text('暂无分组，请先创建一个分组')
+          .fontSize(12)
+          .fontColor('#777777')
+          .margin({ top: 24 })
           .width('100%')
-          .padding({ left: 16, right: 16, bottom: 8 })
-
-          List() {
-            ForEach(this.groups[0].stocks, (s: StockQuote) => {
-              this.buildWatchlistRow(s)
-            }, (s: StockQuote) => s.code)
-          }
-        }
+          .textAlign(TextAlign.Center)
       } else {
-        Column() {
-          Text('暂无自选分组')
+        // 组头（无参 Builder：直接用 activeGroupName + activeGroupId）
+        this.buildActiveGroupHeaderCurrent()
+
+        // 统计（无参 Builder：用 activeGroupXXXText）
+        this.buildGroupStatsCard()
+
+        // 添加条
+        this.buildAddStockBar(this.activeGroupId)
+
+        if (this.activeGroupStocks.length === 0) {
+          Text('该分组暂无股票，请在下方输入代码添加')
             .fontSize(12)
-            .fontColor('#777777')
-            .margin({ top: 32 })
+            .fontColor('#666666')
+            .margin({ top: 12, left: 16 })
+        } else {
+          List() {
+            ForEach(this.activeGroupStocks, (s: StockRef) => {
+              // 这里直接用你现有 buildStockRefRow（它有参数），如果你工程又报“Builder不能带参”，我再给你无参 inline 版本
+              this.buildStockRefRow(this.activeGroupId, s)
+            }, (s: StockRef) => `${this.activeGroupId}-${s.code}`)
+          }
+          .padding({ left: 16, right: 16, top: 8, bottom: 12 })
         }
-        .width('100%')
       }
     }
     .width('100%')
     .height('100%')
     .backgroundColor(Color.Black)
   }
+
+  @Builder
+  private buildActiveGroupHeaderCurrent() {
+    Row({ space: 8 }) {
+      Text(this.activeGroupName)
+        .fontSize(14)
+        .fontColor('#FFFFFF')
+        .fontWeight(FontWeight.Medium)
+
+      Blank()
+
+      Text('删除分组')
+        .fontSize(12)
+        .fontColor('#FF7875')
+        .padding({ left: 10, right: 10, top: 6, bottom: 6 })
+        .backgroundColor('#1A1A1A')
+        .borderRadius(10)
+        .onClick(() => {
+          this.deleteGroup(this.activeGroupId)
+        })
+    }
+    .width('100%')
+    .padding({ left: 16, right: 16, top: 8, bottom: 6 })
+  }
+
+
+  @Builder
+  private buildGroupStrip() {
+    Scroll() {
+      Row({ space: 8 }) {
+        ForEach(this.groups, (group: StockGroup) => {
+          Text(group.name)
+            .fontSize(12)
+            .fontColor(this.activeGroupId === group.id ? '#FFFFFF' : '#DDDDDD')
+            .padding({ left: 12, right: 12, top: 6, bottom: 6 })
+            .backgroundColor(this.activeGroupId === group.id ? '#2A2A2A' : '#161616')
+            .borderRadius(12)
+            .onClick(() => {
+              this.activeGroupId = group.id
+              this.refreshActiveGroupView()
+            })
+        }, (group: StockGroup) => group.id.toString())
+      }
+      .padding({ left: 16, right: 16, top: 12, bottom: 8 })
+    }
+    .scrollable(ScrollDirection.Horizontal)
+  }
+
+  @Builder
+  private buildCreateGroupBar() {
+    Row({ space: 8 }) {
+      TextInput({
+        placeholder: '新建分组名（如 科技股）',
+        text: this.newGroupName // ✅ 受控：UI 绑定 state
+      })
+        .width('68%')
+        .height(32)
+        .fontSize(13)
+        .backgroundColor(Color.White)
+        .fontColor(Color.Black)
+        .onChange((v: string) => {
+          this.newGroupName = v.trim();
+        })
+
+      Button('创建')
+        .height(32)
+        .onClick(async () => {
+          const name: string = this.newGroupName.trim();
+          if (name.length === 0) {
+            this.watchlistMsg = '请输入分组名';
+            return;
+          }
+          await this.createGroup(name);
+
+          // ✅ 不清空（按你的需求保留输入框内容）
+          // this.newGroupName = '';
+        })
+    }
+    .padding({ left: 16, right: 16, bottom: 8 })
+  }
+
+
+  @Builder
+  private buildActiveGroupHeader(g: StockGroup) {
+    Row({ space: 8 }) {
+      Text(g.name)
+        .fontSize(14)
+        .fontColor('#FFFFFF')
+        .fontWeight(FontWeight.Medium)
+
+      Blank()
+
+      Text('删除分组')
+        .fontSize(12)
+        .fontColor('#FF7875')
+        .padding({ left: 10, right: 10, top: 6, bottom: 6 })
+        .backgroundColor('#1A1A1A')
+        .borderRadius(10)
+        .onClick(() => {
+          this.deleteGroup(g.id)
+        })
+    }
+    .width('100%')
+    .padding({ left: 16, right: 16, top: 8, bottom: 6 })
+  }
+
+
+  @Builder
+  private buildGroupStatsCard() {
+    Row({ space: 12 }) {
+      this.buildStatBlock('股票数', this.activeGroupStockCountText)
+      this.buildStatBlock('上涨', this.activeGroupUpCountText)
+      this.buildStatBlock('下跌', this.activeGroupDownCountText)
+      this.buildStatBlock('均涨跌', this.activeGroupAvgPctText)
+    }
+    .width('100%')
+    .padding(12)
+    .margin({ left: 16, right: 16, bottom: 8 })
+    .backgroundColor('#101010')
+    .borderRadius(14)
+  }
+
+  @Builder
+  private buildStatBlock(label: string, value: string) {
+    Column({ space: 4 }) {
+      Text(label).fontSize(10).fontColor('#777777')
+      Text(value).fontSize(14).fontColor('#FFFFFF').fontWeight(FontWeight.Medium)
+    }
+    .width('22%')
+  }
+
+  @Builder
+  private buildAddStockBar(groupId: number) {
+    Row({ space: 8 }) {
+      TextInput({
+        placeholder: '输入 6 位股票代码（如 300750）',
+        text: this.addStockCodeInput // ✅ 受控：UI 永远等于 state
+      })
+        .width('68%')
+        .height(32)
+        .fontSize(13)
+        .backgroundColor(Color.White)
+        .fontColor(Color.Black)
+        .onChange((v: string) => {
+          this.addStockCodeInput = v.trim();
+        })
+
+      Button('添加')
+        .height(32)
+        .onClick(async () => {
+          const code: string = this.addStockCodeInput.trim();
+          if (code.length !== 6) {
+            this.watchlistMsg = '请输入 6 位代码';
+            return;
+          }
+
+          await this.addStocksToGroup(groupId, [code]);
+          this.watchlistMsg = `已尝试添加：${code}`;
+
+          // ✅ 关键：不要清空
+          // this.addStockCodeInput = '';
+        })
+    }
+    .padding({ left: 16, right: 16, bottom: 8 })
+  }
+
+
+  @Builder
+  private buildStockRefRow(groupId: number, s: StockRef) {
+    ListItem() {
+      Row() {
+        Column({ space: 4 }) {
+          Text(this.getStockRowName(s))
+            .fontSize(14)
+            .fontColor(Color.White)
+
+          Text(s.code)
+            .fontSize(11)
+            .fontColor('#666666')
+        }
+
+        Blank()
+
+        Column({ space: 4 }) {
+          Text(this.getStockRowPriceText(s))
+            .fontSize(14)
+            .fontColor(this.getStockRowPriceColor(s))
+            .textAlign(TextAlign.End)
+
+          Text(this.getStockRowChangeText(s) + '  ' + this.getStockRowPctText(s))
+            .fontSize(11)
+            .fontColor(this.getStockRowSubColor(s))
+            .textAlign(TextAlign.End)
+        }
+
+        Text('✕')
+          .fontSize(14)
+          .fontColor('#777777')
+          .margin({ left: 10 })
+          .onClick(() => {
+            this.removeStocksFromGroup(groupId, [s.code])
+          })
+      }
+      .padding({ left: 12, right: 12, top: 10, bottom: 10 })
+      .backgroundColor('#101010')
+      .borderRadius(12)
+    }
+    .margin({ bottom: 8 })
+  }
+
 
   @Builder
   private buildWatchlistRow(s: StockQuote) {
