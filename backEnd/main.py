@@ -37,6 +37,52 @@ Base.metadata.create_all(bind=engine)
 CACHE: dict = {}
 CACHE_TTL = 30  # 秒
 
+# ===== 上游重数据源缓存（避免重复昂贵操作） =====
+
+INDEX_SPOT_CACHE = {
+    "data": None,
+    "ts": 0,
+}
+
+STOCK_SPOT_CACHE = {
+    "data": None,
+    "ts": 0,
+}
+
+# 缓存时间（秒）
+INDEX_SPOT_TTL = 10   # 指数：轻接口，10 秒足够
+STOCK_SPOT_TTL = 10   # 股票：重接口，必须缓存
+
+
+def get_index_spot_df():
+    now = time.time()
+    if INDEX_SPOT_CACHE["data"] is not None and now - INDEX_SPOT_CACHE["ts"] < INDEX_SPOT_TTL:
+        return INDEX_SPOT_CACHE["data"]
+
+    df = ak.stock_zh_index_spot_sina()
+    if df is None or df.empty:
+        raise Exception("index spot source error")
+
+    INDEX_SPOT_CACHE["data"] = df
+    INDEX_SPOT_CACHE["ts"] = now
+    return df
+
+
+def get_stock_spot_df():
+    now = time.time()
+    if STOCK_SPOT_CACHE["data"] is not None and now - STOCK_SPOT_CACHE["ts"] < STOCK_SPOT_TTL:
+        return STOCK_SPOT_CACHE["data"]
+
+    df = ak.stock_zh_a_spot()
+    if df is None or df.empty:
+        raise Exception("stock spot source error")
+
+    STOCK_SPOT_CACHE["data"] = df
+    STOCK_SPOT_CACHE["ts"] = now
+    return df
+
+
+
 
 def get_cache(key: str):
     item = CACHE.get(key)
@@ -126,7 +172,7 @@ def get_quote(
         # 1) 指数列表：新浪 stock_zh_index_spot_sina（基本不变）
         # ============================================================
         if type == "index":
-            df = ak.stock_zh_index_spot_sina()
+            df = get_index_spot_df()
             if df is None or df.empty:
                 raise Exception("index source error")
 
@@ -176,68 +222,53 @@ def get_quote(
         # 2) 股票列表：雪球 stock_individual_spot_xq（循环 3 只预设）
         # ============================================================
         elif type == "stock":
-            # 预设 3 只股票：你可以按需改成自己想要的代码
             if codes:
                 stock_codes = [c.strip() for c in codes.split(",") if c.strip()]
             else:
-                stock_codes = ["300750", "601012", "688981"]  # 宁德时代 / 隆基绿能 / 中芯国际
+                stock_codes = ["300750", "601012", "688981"]
+
+            # 关键：一次性取全市场实时行情（避免雪球单票接口）
+            df = get_stock_spot_df()
+
+            if df is None or df.empty:
+                raise Exception("stock spot source error")
+
+            # 统一列名（不同源列名可能略有差异，你先用这一套；如不匹配我再按你df.columns调整）
+            # 期望列：代码 / 名称 / 最新价 / 涨跌额 / 涨跌幅
+            needed = ["代码", "名称", "最新价", "涨跌额", "涨跌幅"]
+            for col in needed:
+                if col not in df.columns:
+                    raise Exception(f"unexpected stock spot columns, missing: {col}, got: {list(df.columns)}")
+
+            df_sel = df[df["代码"].isin(stock_codes)]
+            if df_sel.empty:
+                raise Exception("no stock rows after filter")
 
             result: List[Quote] = []
+            for _, row in df_sel.iterrows():
+                pct = row["涨跌幅"]
+                if isinstance(pct, str):
+                    pct = pct.replace("%", "").strip()
 
-            for c in stock_codes:
-                try:
-                    xq_symbol = map_stock_code_to_xq_symbol(c)
-                    df = ak.stock_individual_spot_xq(symbol=xq_symbol)
-                    if df is None or df.empty:
-                        # 单只失败就跳过，继续别的
-                        continue
+                q = Quote(
+                    code=str(row["代码"]),
+                    name=str(row["名称"]),
+                    price=float(row["最新价"]),
+                    change=float(row["涨跌额"]),
+                    change_percent=float(pct),
+                )
+                result.append(q)
 
-                    # df 为两列：item / value
-                    kv = {str(r["item"]).strip(): r["value"] for _, r in df.iterrows()}
-
-                    # 这里的 key 用调试过的中文字段
-                    name_raw = kv.get("名称")
-                    price_raw = kv.get("现价") or kv.get(" 现价")
-                    change_raw = kv.get("涨跌")
-                    pct_raw = kv.get("涨幅")
-
-                    if name_raw is None or price_raw is None or change_raw is None or pct_raw is None:
-                        continue
-
-                    name = str(name_raw)
-                    price = float(price_raw)
-                    change = float(change_raw)
-                    change_percent = float(str(pct_raw).replace("%", ""))
-
-                    q = Quote(
-                        code=c,
-                        name=name,
-                        price=price,
-                        change=change,
-                        change_percent=change_percent,
-                    )
-                    result.append(q)
-
-                    db_item = StockQuoteModel(
-                        code=c,
-                        name=name,
-                        price=price,
-                        change=change,
-                        change_percent=change_percent,
-                        updated_at=datetime.utcnow(),
-                    )
-                    db.merge(db_item)
-
-                except Exception:
-                    # 单票出错不影响其它票
-                    traceback.print_exc()
-                    continue
+                db.merge(StockQuoteModel(
+                    code=q.code,
+                    name=q.name,
+                    price=q.price,
+                    change=q.change,
+                    change_percent=q.change_percent,
+                    updated_at=datetime.utcnow(),
+                ))
 
             db.commit()
-
-            if not result:
-                raise Exception("no stock rows from xq")
-
             set_cache(cache_key, result)
             return result
 
@@ -302,7 +333,7 @@ def get_quote_by_code(
         # 1) 指数：新浪接口
         # ========================
         if type == "index":
-            df = ak.stock_zh_index_spot_sina()
+            df = get_index_spot_df()
             if df is None or df.empty:
                 raise Exception("failed to load index data from sina")
 
@@ -347,92 +378,35 @@ def get_quote_by_code(
         # 2) 股票：雪球单票接口
         # ========================
         elif type == "stock":
-            xq_symbol = map_stock_code_to_xq_symbol(code)  # 300750 -> SZ300750 / SH600000
-            df = ak.stock_individual_spot_xq(symbol=xq_symbol)
-
+            df = get_stock_spot_df()
             if df is None or df.empty:
-                raise Exception(f"stock {code} not found from xueqiu")
+                raise Exception("failed to load stock spot data")
 
-            cols = list(df.columns)
-            print("DEBUG stock_individual_spot_xq columns:", cols)
+            row_df = df[df["代码"] == code]
+            if row_df.empty:
+                raise Exception(f"stock {code} not found in spot data")
 
-            # 小工具：安全转 float
-            def to_float(val):
-                if isinstance(val, str):
-                    val = val.replace("%", "").replace(",", "").strip()
-                return float(val)
+            row = row_df.iloc[0]
+            pct = row["涨跌幅"]
+            if isinstance(pct, str):
+                pct = pct.replace("%", "").strip()
 
-            # ---- 情况 A：宽表（多列，直接取字段）----
-            if "item" not in cols or "value" not in cols:
-                def pick_col(candidates):
-                    for cand in candidates:
-                        if cand in cols:
-                            return cand
-                    return None
-
-                name_col = pick_col(["name", "股票名称", "display_name", "名称"])
-                price_col = pick_col(["current_price", "current", "现价", "最新价"])
-                change_amt_col = pick_col(["change_amount", "chg", "涨跌额", "涨跌"])
-                change_pct_col = pick_col(["change_rate", "percent", "涨跌幅", "涨幅"])
-
-                if not all([name_col, price_col, change_amt_col, change_pct_col]):
-                    raise Exception(f"unexpected xq wide-table columns: {cols}")
-
-                row = df.iloc[0]
-                name = str(row[name_col])
-                price = to_float(row[price_col])
-                change = to_float(row[change_amt_col])
-                change_percent = to_float(row[change_pct_col])
-
-            # ---- 情况 B：纵向 KV 表（只有 item / value 两列）----
-            else:
-                kv = {}
-                for _, r in df.iterrows():
-                    key = str(r["item"])
-                    kv[key] = r["value"]
-                print("DEBUG stock_individual_spot_xq kv-keys:", list(kv.keys()))
-
-                # 你当前版本返回中的关键字段（已从日志确认）：
-                # 名称: "名称"
-                # 当前价: " 现价"（注意前面有空格） 或 "现价"
-                # 涨跌额: "涨跌"
-                # 涨跌幅: "涨幅"
-                if "名称" not in kv:
-                    raise Exception(f"no '名称' key in xq kv: {list(kv.keys())}")
-
-                # 现价：优先带空格的 " 现价"，退而求其次 "现价"
-                if " 现价" in kv:
-                    raw_price = kv[" 现价"]
-                elif "现价" in kv:
-                    raw_price = kv["现价"]
-                else:
-                    raise Exception(f"no current price key in xq kv: {list(kv.keys())}")
-
-                if "涨跌" not in kv or "涨幅" not in kv:
-                    raise Exception(f"no change keys in xq kv: {list(kv.keys())}")
-
-                name = str(kv["名称"])
-                price = to_float(raw_price)
-                change = to_float(kv["涨跌"])
-                change_percent = to_float(kv["涨幅"])
-
-            # 统一生成结果 + 写 DB
             result = Quote(
                 code=code,
-                name=name,
-                price=price,
-                change=change,
-                change_percent=change_percent,
+                name=str(row["名称"]),
+                price=float(row["最新价"]),
+                change=float(row["涨跌额"]),
+                change_percent=float(pct),
             )
 
             db = SessionLocal()
             try:
                 db.merge(StockQuoteModel(
                     code=code,
-                    name=name,
-                    price=price,
-                    change=change,
-                    change_percent=change_percent,
+                    name=result.name,
+                    price=result.price,
+                    change=result.change,
+                    change_percent=result.change_percent,
                     updated_at=datetime.utcnow(),
                 ))
                 db.commit()
@@ -441,6 +415,7 @@ def get_quote_by_code(
 
             set_cache(cache_key, result)
             return result
+
 
         # 正常不会走到这里，但做个防御
         else:
