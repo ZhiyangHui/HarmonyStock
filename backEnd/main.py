@@ -45,13 +45,20 @@ INDEX_SPOT_CACHE = {
 }
 
 STOCK_SPOT_CACHE = {
-    "data": None,
-    "ts": 0,
+    "data": None,      # 上一次成功的df
+    "ts": 0.0,         # 上一次成功时间
+    "fail_ts": 0.0,    # 上一次失败时间（用于降频）
 }
+STOCK_FAIL_COOLDOWN = 10  # 秒：失败后10秒内不再疯狂重试
 
 # 缓存时间（秒）
-INDEX_SPOT_TTL = 10   # 指数：轻接口，10 秒足够
-STOCK_SPOT_TTL = 10   # 股票：重接口，必须缓存
+INDEX_SPOT_TTL = 30   # 指数：轻接口，10 秒足够
+STOCK_SPOT_TTL = 30   # 股票：重接口，必须缓存
+
+STOCK_ROW_MAP = {
+    "map": None,   # dict[str, dict] 或 dict[str, Any]
+    "ts": 0.0,
+}
 
 
 def get_index_spot_df():
@@ -70,18 +77,69 @@ def get_index_spot_df():
 
 def get_stock_spot_df():
     now = time.time()
+
+    # 1) 命中有效缓存：直接返回
     if STOCK_SPOT_CACHE["data"] is not None and now - STOCK_SPOT_CACHE["ts"] < STOCK_SPOT_TTL:
         return STOCK_SPOT_CACHE["data"]
 
-    df = ak.stock_zh_a_spot()
-    if df is None or df.empty:
-        raise Exception("stock spot source error")
+    # 2) 如果刚失败过，且手里有旧数据：直接返回旧数据（避免每次请求都阻塞在上游）
+    if (STOCK_SPOT_CACHE["data"] is not None and
+        now - STOCK_SPOT_CACHE["fail_ts"] < STOCK_FAIL_COOLDOWN):
+        return STOCK_SPOT_CACHE["data"]
 
-    STOCK_SPOT_CACHE["data"] = df
-    STOCK_SPOT_CACHE["ts"] = now
-    return df
+    sina_err = None
+
+    # 3) 尝试刷新（新浪）
+    try:
+        df = ak.stock_zh_a_spot()
+        if df is not None and not df.empty:
+            STOCK_SPOT_CACHE["data"] = df
+            STOCK_SPOT_CACHE["ts"] = now
+            return df
+    except Exception as e:
+        sina_err = str(e)
+
+    # 4) 尝试刷新（东财）
+    try:
+        df2 = ak.stock_zh_a_spot_em()
+        if df2 is not None and not df2.empty:
+            STOCK_SPOT_CACHE["data"] = df2
+            STOCK_SPOT_CACHE["ts"] = now
+            return df2
+        raise Exception("empty df from em")
+    except Exception as e2:
+        STOCK_SPOT_CACHE["fail_ts"] = now
+
+        # 5) 刷新失败：如果有旧数据，返回旧数据（核心）
+        if STOCK_SPOT_CACHE["data"] is not None:
+            return STOCK_SPOT_CACHE["data"]
+
+        # 6) 连旧数据都没有：只能抛错
+        raise Exception(f"stock spot upstream failed. sina={sina_err}; em={e2}")
 
 
+def get_stock_row_map() -> dict:
+    df = get_stock_spot_df()
+    now = time.time()
+
+    # 如果 row_map 跟 df 同步（用 ts 判断），直接返回
+    if STOCK_ROW_MAP["map"] is not None and STOCK_ROW_MAP["ts"] == STOCK_SPOT_CACHE["ts"]:
+        return STOCK_ROW_MAP["map"]
+
+    # 重建 map：key 永远是 6 位 code
+    if "代码" not in df.columns:
+        raise Exception(f"spot df missing '代码' column, got: {list(df.columns)}")
+
+    code_series = df["代码"].astype(str).str.strip().str[-6:]
+    # 这里把整行转成 dict，后面取值更快、更稳定
+    row_map = {}
+    for i in range(len(df)):
+        code6 = code_series.iat[i]
+        row_map[code6] = df.iloc[i].to_dict()
+
+    STOCK_ROW_MAP["map"] = row_map
+    STOCK_ROW_MAP["ts"] = STOCK_SPOT_CACHE["ts"]
+    return row_map
 
 
 def get_cache(key: str):
@@ -110,6 +168,22 @@ app.add_middleware(
 @app.get("/")
 def root():
     return {"message": "HarmonyStock backend is running"}
+
+
+@app.on_event("startup")
+def warm_up_cache() -> None:
+    try:
+        get_index_spot_df()
+        print("[startup] index spot warmed")
+    except Exception as e:
+        print("[startup] index warm failed:", e)
+
+    try:
+        get_stock_spot_df()
+        get_stock_row_map()
+        print("[startup] stock spot warmed + row map built")
+    except Exception as e:
+        print("[startup] stock warm failed:", e)
 
 
 # ===== Pydantic 数据结构 =====
@@ -378,31 +452,34 @@ def get_quote_by_code(
         # 2) 股票：雪球单票接口
         # ========================
         elif type == "stock":
-            df = get_stock_spot_df()
-            if df is None or df.empty:
-                raise Exception("failed to load stock spot data")
+            # 1️⃣ 从 row_map 取（不会再 Pandas 全表扫）
+            row_map = get_stock_row_map()
 
-            row_df = df[df["代码"] == code]
-            if row_df.empty:
-                raise Exception(f"stock {code} not found in spot data")
+            code6 = str(code).strip().zfill(6)
+            row = row_map.get(code6)
 
-            row = row_df.iloc[0]
-            pct = row["涨跌幅"]
+            if row is None:
+                raise Exception(f"stock {code6} not found in spot data")
+
+            # 2️⃣ 解析涨跌幅
+            pct = row.get("涨跌幅", 0)
             if isinstance(pct, str):
                 pct = pct.replace("%", "").strip()
 
+            # 3️⃣ 构造返回对象
             result = Quote(
-                code=code,
-                name=str(row["名称"]),
-                price=float(row["最新价"]),
-                change=float(row["涨跌额"]),
+                code=code6,
+                name=str(row.get("名称", "")),
+                price=float(row.get("最新价", 0)),
+                change=float(row.get("涨跌额", 0)),
                 change_percent=float(pct),
             )
 
+            # 4️⃣ 写 DB（兜底用）
             db = SessionLocal()
             try:
                 db.merge(StockQuoteModel(
-                    code=code,
+                    code=code6,
                     name=result.name,
                     price=result.price,
                     change=result.change,
@@ -413,6 +490,7 @@ def get_quote_by_code(
             finally:
                 db.close()
 
+            # 5️⃣ 写接口级缓存
             set_cache(cache_key, result)
             return result
 

@@ -635,8 +635,7 @@ struct HarmonyStockPage {
       // K 线卡片
       this.buildKlineCard();
 
-      // 桌面行情卡片预览
-      this.buildDesktopCardPreview();
+
 
     }
     .width('100%')
@@ -993,34 +992,6 @@ struct HarmonyStockPage {
       })
   }
 
-  // ===== 桌面行情卡片预览（保持原样） =====
-  @Builder
-  private buildDesktopCardPreview() {
-    Column() {
-      Row() {
-        Text('桌面行情卡片预览')
-          .fontSize(14)
-          .fontColor('#CCCCCC')
-        Blank()
-        Text('仅 UI 展示')
-          .fontSize(10)
-          .fontColor('#666666')
-      }
-      .width('100%')
-      .padding({ left: 16, right: 16, bottom: 8 })
-
-      Row({ space: 12 }) {
-        Column() {
-          this.buildDesktopCardSmall();
-        }
-
-        Column() {
-          this.buildDesktopCardLarge();
-        }
-      }
-      .padding({ left: 16, right: 16, bottom: 16 })
-    }
-  }
 
   @Builder
   private buildDesktopCardSmall() {
