@@ -12,3 +12,5 @@
 /.appanalyzer
 venv/
 backEnd/venv/
+stock.db
+*.db
