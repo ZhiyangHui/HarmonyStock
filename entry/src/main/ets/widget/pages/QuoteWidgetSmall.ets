@@ -55,6 +55,7 @@ struct QuoteWidgetSmall {
       Text(this.code)
         .fontSize(10)
         .fontColor('#666666')
+        .margin({ top: 2 })
 
       Text(this.priceText)
         .fontSize(20)

@@ -206,8 +206,20 @@ struct HarmonyStockPage {
   onPageShow() {
     hilog.error(0x0000, 'INDEX_DEBUG', '🔥 Index onPageShow CALLED')
 
-    // ✅ 关键：每次页面展示都尝试消费一次（冷/热启动都覆盖）
+    // ① 先消费 formId（你已有）
     this.consumeFormIdFromAppStorageV2('onPageShow')
+
+    // ② 如果已经有选中的行情，主动同步到桌面卡片
+    if (this.activeFormId.length > 0 && this.selectedQuoteCode.length > 0) {
+      const q: Quote | null = this.findQuoteInCaches(this.selectedQuoteCode)
+      if (q !== null) {
+        hilog.error(DOMAIN, TAG,
+          '[WIDGET] onPageShow sync current quote code=%{public}s',
+          q.code
+        )
+        this.updateWidgetIfLaunchedFromForm(q)
+      }
+    }
   }
 
   private consumeFormIdFromAppStorageV2(from: string): void {
