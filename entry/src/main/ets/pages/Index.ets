@@ -749,9 +749,17 @@ struct HarmonyStockPage {
     this.groups = copy;
     this.activeGroupId = g.id;
 
+    // ✅ 关键：立刻让 UI 的 active 链路同步（不需要再点一次）
+    this.syncActiveStocks();           // 列表 & 股票数立刻正确
+    this.refreshActiveGroupStats();    // 统计卡立刻正确（空组就是 0）
+
     await this.saveGroupsToPrefs();
-    this.preloadActiveGroupQuotes(); // 可选：新组为空也没问题
+
+    // ✅ 可选：新组为空也没关系，但保持流程一致
+    await this.preloadActiveGroupQuotes();
+    this.refreshActiveGroupStats();
   }
+
 
   private async deleteGroup(groupId: number): Promise<void> {
     const copy: StockGroup[] = [];
@@ -764,8 +772,17 @@ struct HarmonyStockPage {
       this.activeGroupId = this.groups.length > 0 ? this.groups[0].id : -1;
     }
 
+    // ✅ 关键：删除导致 activeGroupId 变化时，立刻同步 active 链路
+    this.syncActiveStocks();
+    this.refreshActiveGroupStats();
+
     await this.saveGroupsToPrefs();
-    this.preloadActiveGroupQuotes(); // 可选：删除后如果还有组，预热当前组
+
+    // ✅ 如果还有分组：预热新 active 分组，然后再刷新统计
+    if (this.activeGroupId >= 0) {
+      await this.preloadActiveGroupQuotes();
+      this.refreshActiveGroupStats();
+    }
   }
 
   private async addStocksToGroup(groupId: number, codes: string[]): Promise<void> {
@@ -1778,16 +1795,11 @@ struct HarmonyStockPage {
         // 组头（无参 Builder：直接用 activeGroupName + activeGroupId）
         this.buildActiveGroupHeaderCurrent()
 
-        Text(`DBG len=${this.activeStocks.length} ver=${this.activeStocksVer}`)
-          .fontSize(10)
-          .fontColor('#888888')
-          .margin({ left: 16, bottom: 6 })
-
         // 统计（无参 Builder：用 activeGroupXXXText）
         this.buildGroupStatsCard()
 
         // 添加条
-        this.buildAddStockBar(this.activeGroupId)
+        this.buildAddStockBar()
 
         if (this.getActiveGroupStocksList().length === 0) {
           Text('该分组暂无股票，请在下方输入代码添加')
@@ -1895,8 +1907,6 @@ struct HarmonyStockPage {
           }
           await this.createGroup(name);
 
-          // ✅ 不清空（按你的需求保留输入框内容）
-          // this.newGroupName = '';
         })
     }
     .padding({ left: 16, right: 16, bottom: 8 })
@@ -1966,11 +1976,11 @@ struct HarmonyStockPage {
 
 
   @Builder
-  private buildAddStockBar(groupId: number) {
+  private buildAddStockBar() {
     Row({ space: 8 }) {
       TextInput({
         placeholder: '输入 6 位股票代码（如 300750）',
-        text: this.addStockCodeInput // ✅ 受控：UI 永远等于 state
+        text: this.addStockCodeInput
       })
         .width('68%')
         .height(32)
@@ -1990,15 +2000,20 @@ struct HarmonyStockPage {
             return;
           }
 
-          await this.addStocksToGroup(groupId, [code]);
-          this.watchlistMsg = `已尝试添加：${code}`;
+          // ✅ 关键：永远取“当前 activeGroupId”，不再依赖 Builder 参数闭包
+          const gid: number = this.activeGroupId;
+          if (gid < 0) {
+            this.watchlistMsg = '当前没有可用分组';
+            return;
+          }
 
-          // ✅ 关键：不要清空
-          // this.addStockCodeInput = '';
+          await this.addStocksToGroup(gid, [code]);
+          this.watchlistMsg = `已尝试添加：${code} -> group=${gid}`;
         })
     }
     .padding({ left: 16, right: 16, bottom: 8 })
   }
+
 
 
   @Builder
