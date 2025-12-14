@@ -1201,6 +1201,43 @@ struct HarmonyStockPage {
     this.refreshActiveGroupStats()
   }
 
+  private getGroupAvgPctText(groupId: number): string {
+    // ✅ 依赖缓存版本：行情更新 => quoteCacheVer++ => 这里会重新计算 => UI 重绘
+    const _qv: number = this.quoteCacheVer
+
+    const idx: number = this.findGroupIndex(groupId)
+    if (idx < 0) return '--'
+
+    const st: ActiveGroupStats = this.computeStatsFromStocks(this.groups[idx].stocks)
+    return st.avgPct
+  }
+
+  private getGroupAvgPctColor(groupId: number): string {
+    // ✅ 依赖行情缓存版本，保证行情变化时颜色也刷新
+    const _qv: number = this.quoteCacheVer
+
+    const idx: number = this.findGroupIndex(groupId)
+    if (idx < 0) return '#777777'
+
+    const st: ActiveGroupStats = this.computeStatsFromStocks(this.groups[idx].stocks)
+    const avg: string = st.avgPct
+
+    // 没有行情
+    if (avg === '--') {
+      return '#777777'
+    }
+
+    // 去掉 %
+    const v: number = Number(avg.replace('%', ''))
+    if (Number.isNaN(v)) {
+      return '#777777'
+    }
+
+    // ✅ 涨红，跌绿（按你当前全局配色）
+    return v >= 0 ? '#FF4D4F' : '#39D98A'
+  }
+
+
 
 
   // ===== 自定义 TabBar：这里就能完全控制文字颜色 =====
@@ -1856,24 +1893,25 @@ struct HarmonyStockPage {
     Scroll() {
       Row({ space: 8 }) {
         ForEach(this.groups, (group: StockGroup) => {
-          Text(group.name)
-            .fontSize(12)
-            .fontColor(this.activeGroupId === group.id ? '#FFFFFF' : '#DDDDDD')
-            .padding({ left: 12, right: 12, top: 6, bottom: 6 })
-            .backgroundColor(this.activeGroupId === group.id ? '#2A2A2A' : '#161616')
-            .borderRadius(12)
-            .onClick(async () => {
-              this.activeGroupId = group.id
+          Column({ space: 2 }) {
+            Text(group.name)
+              .fontSize(12)
+              .fontColor(this.activeGroupId === group.id ? '#FFFFFF' : '#DDDDDD')
 
-              // ✅ 1）先让列表/股票数立刻更新
-              this.syncActiveStocks()
+            Text(this.getGroupAvgPctText(group.id))
+              .fontSize(10)
+              .fontColor(this.getGroupAvgPctColor(group.id))
+          }
+          .padding({ left: 12, right: 12, top: 6, bottom: 6 })
+          .backgroundColor(this.activeGroupId === group.id ? '#2A2A2A' : '#161616')
+          .borderRadius(12)
+          .onClick(async () => {
+            this.activeGroupId = group.id
 
-              // ✅ 2）再预热行情（回来会 quoteCacheVer++）
-              await this.preloadActiveGroupQuotes()
-
-              // ✅ 3）预热回来后再 sync 一次（不是必须，但能确保依赖链完整）
-              this.syncActiveStocks()
-            })
+            this.syncActiveStocks()
+            await this.preloadActiveGroupQuotes()
+            this.syncActiveStocks()
+          })
         }, (group: StockGroup) => group.id.toString())
       }
       .padding({ left: 16, right: 16, top: 12, bottom: 8 })
