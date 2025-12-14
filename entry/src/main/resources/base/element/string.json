@@ -11,6 +11,14 @@
     {
       "name": "EntryAbility_label",
       "value": "鸿股通"
+    },
+    {
+      "name": "widget_desc",
+      "value": "This is a service widget."
+    },
+    {
+      "name": "widget_display_name",
+      "value": "widget"
     }
   ]
 }

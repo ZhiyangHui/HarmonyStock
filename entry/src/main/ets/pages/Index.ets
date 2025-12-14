@@ -2,6 +2,18 @@
 import { TabBarOptions } from '@kit.ArkUI';
 import http from '@ohos.net.http';
 import preferences from '@ohos.data.preferences';
+import { formBindingData, formProvider } from '@kit.FormKit';
+import { AppStorageV2 } from '@kit.ArkUI'
+import { hilog } from '@kit.PerformanceAnalysisKit'
+import { ActiveFormState, APP_STORAGE_KEY_ACTIVE_FORM } from '../common/ActiveFormatState'
+
+import notificationManager from '@ohos.notificationManager'
+import notification from '@ohos.notification'
+import wantAgent from '@ohos.wantAgent'
+import common from '@ohos.app.ability.common'
+
+const DOMAIN = 0x0000
+const TAG: string = 'HarmonyStock'
 
 
 // ====== 通用行情结构（指数 / 股票） ======
@@ -84,6 +96,21 @@ interface ActiveGroupStats {
   up: string;
   down: string;
   avgPct: string;
+}
+
+
+
+interface WidgetBindData {
+  formId: string
+  title: string
+  code: string
+  name: string
+  priceText: string
+  changeText: string
+  pctText: string
+  tsText: string
+  hasPrev: boolean
+  hasNext: boolean
 }
 
 
@@ -174,6 +201,41 @@ struct HarmonyStockPage {
   @State activeStatAvgPct: string = '--'
   @State activeStatsVer: number = 0   // 保留也行（用于 key）
 
+  // ✅ 加在这里（和其他状态字段放一起）
+  @State activeFormId: string = ''
+
+  onPageShow() {
+    hilog.error(0x0000, 'INDEX_DEBUG', '🔥 Index onPageShow CALLED')
+
+    // ✅ 关键：每次页面展示都尝试消费一次（冷/热启动都覆盖）
+    this.consumeFormIdFromAppStorageV2('onPageShow')
+  }
+
+  private consumeFormIdFromAppStorageV2(from: string): void {
+    const st: ActiveFormState | undefined =
+      AppStorageV2.connect(ActiveFormState, APP_STORAGE_KEY_ACTIVE_FORM, () => new ActiveFormState())
+
+    if (!st) {
+      hilog.error(DOMAIN, TAG, '[%{public}s] AppStorageV2.connect failed', from)
+      return
+    }
+
+    const fid: string = st.formId
+    if (fid.length === 0) {
+      hilog.info(DOMAIN, TAG, '[%{public}s] no formId in ActiveFormState', from)
+      return
+    }
+
+    // 1) 同步到页面字段：后续 updateWidgetIfLaunchedFromForm 依赖它
+    this.activeFormId = fid
+
+    // 2) 消费掉，避免重复
+    st.formId = ''
+
+    hilog.info(DOMAIN, TAG, '[%{public}s] ✅ consumed formId=%{public}s -> this.activeFormId', from, fid)
+  }
+
+
   private refreshActiveGroupStats(): void {
     const st: ActiveGroupStats = this.computeStatsFromStocks(this.activeStocks)
     this.activeStatStockCount = st.stockCount
@@ -184,7 +246,6 @@ struct HarmonyStockPage {
     console.info(`[DBG] stats=${this.activeStatStockCount}, up=${this.activeStatUp}, down=${this.activeStatDown}, avg=${this.activeStatAvgPct}, ver=${this.activeStatsVer}`)
 
   }
-
 
 
   // ===== 自选 / 通知假数据（保持原样） =====
@@ -241,23 +302,20 @@ struct HarmonyStockPage {
 
   // ===== 页面生命周期 =====
   aboutToAppear() {
-    this.dbg('aboutToAppear:enter');
-
+    // 你原来的逻辑保持不动
+    this.dbg('aboutToAppear:enter')
     this.loadGroupsFromPrefs().then(async () => {
-      this.dbg('aboutToAppear:afterLoadPrefs');
-
-
-
-      await this.preloadActiveGroupQuotes();
-      this.dbg('aboutToAppear:afterPreload');
-
-
-      this.fetchQuotes(this.currentMode);
-      this.dbg('aboutToAppear:afterFetchQuotesCalled');
-    });
+      this.dbg('aboutToAppear:afterLoadPrefs')
+      await this.preloadActiveGroupQuotes()
+      this.dbg('aboutToAppear:afterPreload')
+      this.fetchQuotes(this.currentMode)
+      this.dbg('aboutToAppear:afterFetchQuotesCalled')
+    })
   }
 
+  aboutToDisappear(): void {
 
+  }
 
   // ===== 拉取行情列表（指数 / 股票共用） =====
   private async fetchQuotes(type: 'index' | 'stock'): Promise<void> {
@@ -1237,7 +1295,49 @@ struct HarmonyStockPage {
     return v >= 0 ? '#FF4D4F' : '#39D98A'
   }
 
+  // ✅ 方案1第三步：把 Quote 转成桌面卡片绑定数据
+  private buildWidgetDataFromQuote(q: Quote): WidgetBindData {
+    const now: Date = new Date()
+    const hh: string = now.getHours().toString().padStart(2, '0')
+    const mm: string = now.getMinutes().toString().padStart(2, '0')
 
+    return {
+      formId: this.activeFormId,
+      title: (q.type === 'index') ? '指数' : '股票',
+      code: q.code,
+      name: q.name,
+      priceText: q.price.toFixed(2),
+      changeText: q.change.toFixed(2),
+      pctText: q.changePercent.toFixed(2) + '%',
+      tsText: `${hh}:${mm}`,
+      hasPrev: true,
+      hasNext: true
+    }
+  }
+
+  // ✅ 方案1第三步：如果是从桌面卡片打开的 App（activeFormId 有值），就把当前选择回写到卡片
+  private async updateWidgetIfLaunchedFromForm(q: Quote): Promise<void> {
+    const fid: string = this.activeFormId.trim()
+
+    hilog.error(DOMAIN, TAG, '[WIDGET] ENTER updateWidget fid=%{public}s code=%{public}s', fid, q.code)
+
+    if (fid.length === 0) {
+      hilog.error(DOMAIN, TAG, '[WIDGET] SKIP activeFormId empty')
+      return
+    }
+
+    try {
+      const data: WidgetBindData = this.buildWidgetDataFromQuote(q)
+      const binding: formBindingData.FormBindingData = formBindingData.createFormBindingData(data)
+
+      await formProvider.updateForm(fid, binding)
+
+      hilog.error(DOMAIN, TAG, '[WIDGET] OK updateForm formId=%{public}s code=%{public}s', fid, q.code)
+    } catch (e) {
+      hilog.error(DOMAIN, TAG, '[WIDGET] FAIL updateForm formId=%{public}s err=%{public}s',
+        fid, JSON.stringify(e))
+    }
+  }
 
 
   // ===== 自定义 TabBar：这里就能完全控制文字颜色 =====
@@ -1534,12 +1634,17 @@ struct HarmonyStockPage {
             .fontColor(item.change >= 0 ? '#FF7875' : '#6BE49B')
             .margin({ top: 4 })
         }
-        .onClick(() => {
-          this.selectedQuoteCode = item.code;
-          this.selectedQuoteName = item.name;
-          this.selectedQuoteType = item.type;
-          const period: string = this.getKlinePeriodParam();
-          this.fetchKline(item.type, item.code, period);
+        .onClick(async () => {
+          hilog.error(DOMAIN, TAG, '[WIDGET] CLICK quote=%{public}s activeFormId=%{public}s', item.code, this.activeFormId)
+
+          this.selectedQuoteCode = item.code
+          this.selectedQuoteName = item.name
+          this.selectedQuoteType = item.type
+
+          await this.updateWidgetIfLaunchedFromForm(item)
+
+          const period: string = this.getKlinePeriodParam()
+          this.fetchKline(item.type, item.code, period)
         })
 
         // ===== 右下角 +/-：只负责展开收起 =====
