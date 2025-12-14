@@ -46,6 +46,7 @@
             "resource": "$profile:backup_config"
           }
         ],
+
       },
       {
         "name": "QuoteFormAbility",
@@ -57,7 +58,8 @@
             "name": "ohos.extension.form",
             "resource": "$profile:form_config"
           }
-        ]
+        ],
+
       }
     ],
     "requestPermissions": [
