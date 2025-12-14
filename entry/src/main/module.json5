@@ -46,6 +46,18 @@
             "resource": "$profile:backup_config"
           }
         ],
+      },
+      {
+        "name": "QuoteFormAbility",
+        "srcEntry": "./ets/formability/QuoteFormAbility.ets",
+        "type": "form",
+        "visible": true,
+        "metadata": [
+          {
+            "name": "ohos.extension.form",
+            "resource": "$profile:form_config"
+          }
+        ]
       }
     ],
     "requestPermissions": [
