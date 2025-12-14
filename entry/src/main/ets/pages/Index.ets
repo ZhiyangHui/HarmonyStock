@@ -9,8 +9,7 @@ import { ActiveFormState, APP_STORAGE_KEY_ACTIVE_FORM } from '../common/ActiveFo
 
 import notificationManager from '@ohos.notificationManager'
 import notification from '@ohos.notification'
-import wantAgent from '@ohos.wantAgent'
-import common from '@ohos.app.ability.common'
+
 
 const DOMAIN = 0x0000
 const TAG: string = 'HarmonyStock'
@@ -1340,6 +1339,81 @@ struct HarmonyStockPage {
   }
 
 
+
+  private async triggerRuleAlert(rule: NotifyRule): Promise<void> {
+    try {
+      // 先尝试拉起通知授权弹窗（若已开启，通常不会影响；若未开启会提示用户开启）
+      // 若用户拒绝，常见错误码为 1600004
+      try {
+        await notificationManager.requestEnableNotification()
+      } catch (e) {
+        // 不使用 any/unknown：只做最保守处理
+        const errObj: Record<string, Object> = e as Record<string, Object>
+        const codeNum: number = Number(errObj['code'])
+        hilog.error(DOMAIN, TAG, 'requestEnableNotification failed: %{public}s', JSON.stringify(e))
+
+        // 1600004：用户拒绝/通知未授权（或已被关闭）
+        if (codeNum === 1600004) {
+          // 这里你可以改成 UI 提示：引导用户到系统设置开启通知
+          return
+        }
+      }
+
+      const req: notificationManager.NotificationRequest = {
+        id: 10000 + rule.id,
+        content: {
+          // 关键：用 notificationContentType（不是 contentType）
+          notificationContentType: notificationManager.ContentType.NOTIFICATION_CONTENT_BASIC_TEXT,
+          normal: {
+            title: '行情提醒',
+            text: `${rule.stockName}（${rule.stockCode}）${rule.conditionText}`,
+            additionalText: '打开应用查看详情'
+          }
+        }
+        // slotType / wantAgent / autoDeleted：先都不写，避免你当前 SDK 枚举/类型不一致导致编译或运行失败
+      }
+
+      await notificationManager.publish(req)
+      hilog.info(DOMAIN, TAG, 'triggerRuleAlert ok, id=%{public}d', req.id)
+    } catch (e) {
+      hilog.error(DOMAIN, TAG, 'triggerRuleAlert failed: %{public}s', JSON.stringify(e))
+    }
+  }
+
+
+
+  // ✅ 先检查通知是否开启；没开就拉起系统授权/开关页面
+  private async ensureNotificationEnabled(): Promise<boolean> {
+    try {
+      const enabled: boolean = await notificationManager.isNotificationEnabled()
+      if (enabled) {
+        return true
+      }
+
+      // 拉起系统界面让用户打开通知开关
+      await notificationManager.requestEnableNotification()
+
+      // 用户操作后再检查一次
+      const enabled2: boolean = await notificationManager.isNotificationEnabled()
+      return enabled2
+    } catch (e) {
+      // 任意异常都视为不可用
+      return false
+    }
+  }
+
+  // ✅ 专门处理 publish 的 1600004：提示 + 引导开启
+  private async handlePublishError(code: number): Promise<void> {
+    if (code === 1600004) {
+      // 你可以用你现有的 UI 状态字段提示用户
+      this.watchlistMsg = '通知权限未开启：请在系统设置中为 HarmonyStock 打开通知后重试'
+      // 再主动拉起一次系统开关界面
+      await this.ensureNotificationEnabled()
+    }
+  }
+
+
+
   // ===== 自定义 TabBar：这里就能完全控制文字颜色 =====
   @Builder
   tabBarBuilder(title: string, index: number) {
@@ -1355,7 +1429,21 @@ struct HarmonyStockPage {
   }
 
   build() {
+
     Column() {
+
+      Button('发送一条测试通知')
+        .margin({ left: 16, right: 16, top: 8, bottom: 8 })
+        .onClick(async () => {
+          const rule: NotifyRule = {
+            id: 999,
+            stockCode: '300750',
+            stockName: '宁德时代',
+            conditionText: '价格 ≥ 220.00',
+            enabled: true
+          }
+          await this.triggerRuleAlert(rule)
+        })
       // 顶部标题栏
       this.buildHeader()
 
@@ -1601,9 +1689,6 @@ struct HarmonyStockPage {
   @Builder
   private buildQuoteCard(item: Quote) {
     Column() {
-      // 直接 inline 取 expanded，避免 Builder 内 const/let
-      // expanded = this.cardExpandedMap.get(`${item.type}-${item.code}`) ?? false
-
       Column() {
         // ===== 卡片主体：点这里才选中 + 拉 K 线 =====
         Column() {
@@ -1615,9 +1700,12 @@ struct HarmonyStockPage {
             Text('✕')
               .fontSize(12)
               .fontColor('#777777')
-              .onClick(async () => {
-                await this.removeQuoteCard(item.code, item.type);;
-              })
+              // ✅ 用 TapGesture，避免被 Scroll 手势吞 / 冲突
+              .parallelGesture(
+                TapGesture().onAction(async () => {
+                  await this.removeQuoteCard(item.code, item.type)
+                })
+              )
           }
           .width('100%')
           .justifyContent(FlexAlign.SpaceBetween)
@@ -1634,18 +1722,6 @@ struct HarmonyStockPage {
             .fontColor(item.change >= 0 ? '#FF7875' : '#6BE49B')
             .margin({ top: 4 })
         }
-        .onClick(async () => {
-          hilog.error(DOMAIN, TAG, '[WIDGET] CLICK quote=%{public}s activeFormId=%{public}s', item.code, this.activeFormId)
-
-          this.selectedQuoteCode = item.code
-          this.selectedQuoteName = item.name
-          this.selectedQuoteType = item.type
-
-          await this.updateWidgetIfLaunchedFromForm(item)
-
-          const period: string = this.getKlinePeriodParam()
-          this.fetchKline(item.type, item.code, period)
-        })
 
         // ===== 右下角 +/-：只负责展开收起 =====
         Row() {
@@ -1653,9 +1729,12 @@ struct HarmonyStockPage {
           Text((this.cardExpandedMap.get(`${item.type}-${item.code}`) ?? false) ? '－' : '＋')
             .fontSize(18)
             .fontColor('#CCCCCC')
-            .onClick(() => {
-              this.toggleCardExpanded(item);
-            })
+            // ✅ 也用 TapGesture，避免和外层点击打架
+            .parallelGesture(
+              TapGesture().onAction(() => {
+                this.toggleCardExpanded(item)
+              })
+            )
         }
         .width('100%')
         .margin({ top: 8 })
@@ -1665,9 +1744,30 @@ struct HarmonyStockPage {
       .borderRadius(12)
       .width((this.cardExpandedMap.get(`${item.type}-${item.code}`) ?? false) ? 200 : 140)
       .height((this.cardExpandedMap.get(`${item.type}-${item.code}`) ?? false) ? 150 : undefined)
+
+      // ✅ 关键：外层卡片用 parallelGesture 捕获 tap，横向 Scroll 下更稳定
+      .parallelGesture(
+        TapGesture().onAction(async () => {
+          console.info(`[TAP] quoteCard tapped code=${item.code} activeFormId=${this.activeFormId}`)
+          hilog.error(DOMAIN, TAG, '[TAP] quoteCard tapped code=%{public}s activeFormId=%{public}s',
+            item.code, this.activeFormId)
+
+          this.selectedQuoteCode = item.code
+          this.selectedQuoteName = item.name
+          this.selectedQuoteType = item.type
+          hilog.error(DOMAIN, TAG, '[TAP] selected set type=%{public}s code=%{public}s', item.type, item.code)
+
+          hilog.error(DOMAIN, TAG, '[TAP] before updateWidgetIfLaunchedFromForm')
+          await this.updateWidgetIfLaunchedFromForm(item)
+          hilog.error(DOMAIN, TAG, '[TAP] after updateWidgetIfLaunchedFromForm')
+
+          // ✅ 你要的“点击切换行情卡片 + 拉K线”
+          const period: string = this.getKlinePeriodParam()
+          this.fetchKline(item.type, item.code, period)
+        })
+      )
     }
   }
-
 
 
   // ===== K 线卡片 =====

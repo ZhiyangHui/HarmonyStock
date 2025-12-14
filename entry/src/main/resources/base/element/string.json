@@ -19,6 +19,10 @@
     {
       "name": "widget_display_name",
       "value": "widget"
+    },
+    {
+      "name": "permission_notification_reason",
+      "value": "用于发送行情提醒通知"
     }
   ]
 }
