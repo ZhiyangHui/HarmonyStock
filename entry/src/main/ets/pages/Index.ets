@@ -549,7 +549,7 @@ struct HarmonyStockPage {
 
   // ===== 根据代码查询单个标的（指数 / 股票通用） =====
   private async queryQuoteByCode(): Promise<void> {
-    const code: string = this.searchCode.trim();
+    const code: string = this.searchCode.trim()
 
     if (code.length !== 6) {
       this.searchError = '请输入 6 位代码';
