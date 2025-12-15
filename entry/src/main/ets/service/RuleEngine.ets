@@ -5,8 +5,11 @@ import { NotifyCenter, QuoteAlertPayload } from './NotifyCenter'
 const DOMAIN: number = 0x0000
 const TAG: string = 'HarmonyStock.Rule'
 
+export type QuoteType = 'index' | 'stock'
+
 export interface NotifyRuleLite {
   id: number
+  quoteType: QuoteType          // ✅ 新增：指数/股票
   stockCode: string
   stockName: string
   conditionText: string
@@ -131,7 +134,8 @@ export class RuleEngine {
       const parsed: ParsedRule = parseConditionText(r.conditionText)
       if (!parsed.ok) continue
 
-      const price: number | null = await RuleEngine.fetchPrice(r.stockCode)
+      const price: number | null = await RuleEngine.fetchPrice(r.quoteType, r.stockCode)
+      hilog.info(DOMAIN, TAG, 'rule hit id=%{public}d type=%{public}s code=%{public}s', r.id, r.quoteType, r.stockCode)
       if (price === null) continue
 
       if (!hit(parsed.op, price, parsed.threshold)) continue
@@ -158,13 +162,15 @@ export class RuleEngine {
     }
   }
 
-  private static async fetchPrice(code6: string): Promise<number | null> {
+  private static async fetchPrice(quoteType: QuoteType, code6: string): Promise<number | null> {
     const code: string = code6.trim()
     if (code.length !== 6) return null
 
     const httpRequest = http.createHttp()
     try {
-      const url: string = `http://101.43.185.73:8000/api/quote/by_code?type=stock&code=${code}`
+      const url: string =
+        `http://101.43.185.73:8000/api/quote/by_code?type=${quoteType}&code=${code}` // ✅ 关键：type 用 quoteType
+
       const res = await httpRequest.request(url, {
         method: http.RequestMethod.GET,
         connectTimeout: 55000,
@@ -173,13 +179,8 @@ export class RuleEngine {
 
       if (res.responseCode === 200 && res.result) {
         const raw: BackendQuote = JSON.parse(res.result as string) as BackendQuote
-        hilog.info(
-          DOMAIN,
-          TAG,
-          'fetchPrice ok code=%{public}s price=%{public}s',
-          code,
-          raw.price.toFixed(2)
-        )
+        hilog.info(DOMAIN, TAG, 'fetchPrice ok type=%{public}s code=%{public}s price=%{public}s',
+          quoteType, code, raw.price.toFixed(2))
         return raw.price
       }
       return null

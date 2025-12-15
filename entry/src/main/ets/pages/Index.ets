@@ -45,12 +45,15 @@ interface StockQuote {
   changePercent: number;
 }
 
+type QuoteType = 'index' | 'stock'
+
 interface NotifyRule {
-  id: number;
-  stockCode: string;
-  stockName: string;
-  conditionText: string; // 比如 "价格 ≥ 25.00"
-  enabled: boolean;
+  id: number
+  quoteType: QuoteType          // ✅ 新增
+  stockCode: string
+  stockName: string
+  conditionText: string
+  enabled: boolean
 }
 
 // ====== K 线点结构（指数 / 股票通用） ======
@@ -210,6 +213,7 @@ struct HarmonyStockPage {
   @State ruleOpIndex: number = 0        // 0: ≥  1: ≤
   @State rulePriceInput: string = ''    // 阈值
   @State ruleMsg: string = ''
+  @State ruleQuoteType: QuoteType = 'stock'   // ✅ 默认股票
 
   @State notifyRulesVer: number = 0
 
@@ -293,8 +297,8 @@ struct HarmonyStockPage {
   ];
 
   @State notifyRules: NotifyRule[] = [
-    { id: 999, stockCode: '300750', stockName: '宁德时代', conditionText: '价格 ≥ 1.00', enabled: true },
-    { id: 2, stockCode: '601012', stockName: '隆基绿能', conditionText: '价格 ≤ 28.00', enabled: false }
+    { id: 999, quoteType: 'stock', stockCode: '300750', stockName: '宁德时代', conditionText: '价格 ≥ 1.00', enabled: true },
+    { id: 2, quoteType: 'stock', stockCode: '601012', stockName: '隆基绿能', conditionText: '价格 ≤ 28.00', enabled: false }
   ]
 
   private nextRuleId: number = 1000
@@ -326,7 +330,14 @@ struct HarmonyStockPage {
       const out: NotifyRuleLite[] = []
       for (let i: number = 0; i < this.notifyRules.length; i++) {
         const r: NotifyRule = this.notifyRules[i]
-        out.push({ id: r.id, stockCode: r.stockCode, stockName: r.stockName, conditionText: r.conditionText, enabled: r.enabled })
+        out.push({
+          id: r.id,
+          quoteType: r.quoteType,     // ✅ 必须加
+          stockCode: r.stockCode,
+          stockName: r.stockName,
+          conditionText: r.conditionText,
+          enabled: r.enabled
+        })
       }
       return out
     }, 5000, 10000)
@@ -1113,6 +1124,41 @@ struct HarmonyStockPage {
     }
   }
 
+  private async ensureQuoteCachedByType(type: QuoteType, code6: string): Promise<void> {
+    const code: string = code6.trim()
+    if (code.length !== 6) return
+
+    const cacheKey: string = `${type}-${code}`
+    const existed: Quote | undefined = this.quoteCache.get(cacheKey)
+    if (existed !== undefined) return
+
+    const httpRequest = http.createHttp()
+    try {
+      const url: string = `http://101.43.185.73:8000/api/quote/by_code?type=${type}&code=${code}`
+      const res = await httpRequest.request(url, {
+        method: http.RequestMethod.GET,
+        connectTimeout: this.HTTP_CONNECT_TIMEOUT,
+        readTimeout: this.HTTP_READ_TIMEOUT
+      })
+      if (res.responseCode === 200 && res.result) {
+        const backendItem: BackendQuote = JSON.parse(res.result as string) as BackendQuote
+        const q: Quote = this.mapBackendQuote(backendItem, type)
+        this.mergeQuotesToCache([q])
+      }
+    } catch (e) {
+      // ignore
+    } finally {
+      httpRequest.destroy()
+    }
+  }
+
+  private findQuoteInCacheByType(type: QuoteType, code6: string): Quote | null {
+    const code: string = code6.trim()
+    if (code.length !== 6) return null
+    const k: string = `${type}-${code}`
+    const v: Quote | undefined = this.quoteCache.get(k)
+    return (v !== undefined) ? v : null
+  }
 
   private async preloadActiveGroupQuotes(): Promise<void> {
     const g: StockGroup | null = this.getActiveGroup();
@@ -1473,8 +1519,19 @@ struct HarmonyStockPage {
         const conditionText: string = String(item['conditionText'] ?? '').trim()
         const enabled: boolean = Boolean(item['enabled'])
 
+        // ✅ 新增：quoteType（老数据没有就默认 stock）
+        const qtRaw: string = String(item['quoteType'] ?? 'stock').trim()
+        const quoteType: QuoteType = (qtRaw === 'index') ? 'index' : 'stock'
+
         if (!Number.isNaN(id) && stockCode.length === 6 && stockName.length > 0 && conditionText.length > 0) {
-          out.push({ id, stockCode, stockName, conditionText, enabled })
+          out.push({
+            id: id,
+            quoteType: quoteType,
+            stockCode: stockCode,
+            stockName: stockName,
+            conditionText: conditionText,
+            enabled: enabled
+          })
         }
       }
       return out
@@ -1509,19 +1566,21 @@ struct HarmonyStockPage {
     const cond: string = `价格 ${opText} ${v.toFixed(2)}`
     for (let i: number = 0; i < this.notifyRules.length; i++) {
       const r: NotifyRule = this.notifyRules[i]
-      if (r.stockCode === code && r.conditionText === cond) {
+      if (r.quoteType === this.ruleQuoteType && r.stockCode === code && r.conditionText === cond) {
         this.ruleMsg = '该规则已存在'
         return
       }
     }
 
     // 尽量从缓存/后端拿 name（你的 ensureQuoteCachedForCode 已有）
-    await this.ensureQuoteCachedForCode(code)
-    const q: Quote | null = this.findStockQuoteInCache(code)
+    const qt: QuoteType = this.ruleQuoteType
+    await this.ensureQuoteCachedByType(qt, code)
+    const q: Quote | null = this.findQuoteInCacheByType(qt, code)
     const name: string = (q !== null) ? q.name : code
 
     const newRule: NotifyRule = {
       id: this.nextRuleId,
+      quoteType: qt,                 // ✅ 新增
       stockCode: code,
       stockName: name,
       conditionText: cond,
@@ -2475,81 +2534,114 @@ struct HarmonyStockPage {
     Column() {
       Row() {
         Text('通知规则').fontSize(14).fontColor(Color.White)
-        Blank()
-        Text('命中后：系统通知 + 震动（真机）')
-          .fontSize(10).fontColor('#777777')
       }
       .width('100%')
       .padding({ left: 16, right: 16, top: 12, bottom: 8 })
 
       // ✅ 新增规则区
       Column({ space: 8 }) {
-        Row({ space: 8 }) {
-          TextInput({ placeholder: '股票代码(6位)', text: this.ruleStockCodeInput })
-            .width('38%').height(32).fontSize(13)
-            .backgroundColor(Color.White).fontColor(Color.Black)
-            .onChange((v: string) => { this.ruleStockCodeInput = v.trim() })
-
-          // 操作符：用两个小按钮最稳，不用复杂 Picker
+        Column({space:8}){
           Row({ space: 6 }) {
-            Text('≥')
-              .fontSize(12)
-              .fontColor(this.ruleOpIndex === 0 ? '#FFFFFF' : '#AAAAAA')
-              .padding({ left: 10, right: 10, top: 6, bottom: 6 })
-              .backgroundColor(this.ruleOpIndex === 0 ? '#333333' : '#181818')
-              .borderRadius(10)
-              .onClick(() => { this.ruleOpIndex = 0 })
-
-            Text('≤')
-              .fontSize(12)
-              .fontColor(this.ruleOpIndex === 1 ? '#FFFFFF' : '#AAAAAA')
-              .padding({ left: 10, right: 10, top: 6, bottom: 6 })
-              .backgroundColor(this.ruleOpIndex === 1 ? '#333333' : '#181818')
-              .borderRadius(10)
-              .onClick(() => { this.ruleOpIndex = 1 })
+            this.buildRuleTypeChip('股票', 'stock')
+            this.buildRuleTypeChip('指数', 'index')
           }
+          Row({ space: 8 }) {
+            // ✅ 类型选择：股票 / 指数
 
-          TextInput({ placeholder: '阈值', text: this.rulePriceInput })
-            .width('24%').height(32).fontSize(13)
-            .backgroundColor(Color.White).fontColor(Color.Black)
-            .onChange((v: string) => { this.rulePriceInput = v.trim() })
 
-          Button('添加')
-            .height(32)
-            .onClick(async () => { await this.addNotifyRuleFromUI() })
+            // ✅ 代码输入
+            TextInput({
+              placeholder: this.ruleQuoteType === 'stock' ? '股票代码(6位)' : '指数代码(6位)',
+              text: this.ruleStockCodeInput
+            })
+              .width('28%')
+              .height(32)
+              .fontSize(13)
+              .backgroundColor(Color.White)
+              .fontColor(Color.Black)
+              .onChange((v: string) => { this.ruleStockCodeInput = v.trim() })
+
+            // ✅ 操作符
+            Row({ space: 6 }) {
+              Text('≥')
+                .fontSize(12)
+                .fontColor(this.ruleOpIndex === 0 ? '#FFFFFF' : '#AAAAAA')
+                .padding({ left: 10, right: 10, top: 6, bottom: 6 })
+                .backgroundColor(this.ruleOpIndex === 0 ? '#333333' : '#181818')
+                .borderRadius(10)
+                .onClick(() => { this.ruleOpIndex = 0 })
+
+              Text('≤')
+                .fontSize(12)
+                .fontColor(this.ruleOpIndex === 1 ? '#FFFFFF' : '#AAAAAA')
+                .padding({ left: 10, right: 10, top: 6, bottom: 6 })
+                .backgroundColor(this.ruleOpIndex === 1 ? '#333333' : '#181818')
+                .borderRadius(10)
+                .onClick(() => { this.ruleOpIndex = 1 })
+            }
+
+            // ✅ 阈值
+            TextInput({ placeholder: '阈值', text: this.rulePriceInput })
+              .width('18%')
+              .height(32)
+              .fontSize(13)
+              .backgroundColor(Color.White)
+              .fontColor(Color.Black)
+              .onChange((v: string) => { this.rulePriceInput = v.trim() })
+
+            // ✅ 添加
+            Button('添加')
+              .height(32)
+              .onClick(async () => { await this.addNotifyRuleFromUI() })
+          }
         }
 
+
         if (this.ruleMsg.length > 0) {
-          Text(this.ruleMsg).fontSize(10).fontColor('#777777')
+          Text(this.ruleMsg)
+            .fontSize(10)
+            .fontColor('#777777')
         }
       }
       .padding({ left: 16, right: 16, bottom: 10 })
 
+      // ✅ 规则列表
       List() {
         ForEach(this.notifyRules, (rule: NotifyRule) => {
-          this.buildNotifyRuleItem(rule);
+          this.buildNotifyRuleItem(rule)
         }, (rule: NotifyRule) => rule.id.toString())
       }
-      .key(`notifyRules-${this.notifyRulesVer}`)  // 使用 notifyRulesVer 作为 key，确保每次更新时渲染
-
+      .key(`notifyRules-${this.notifyRulesVer}`)
     }
     .width('100%')
     .height('100%')
     .backgroundColor(Color.Black)
   }
 
-
   @Builder
   private buildNotifyRuleItem(rule: NotifyRule) {
     ListItem() {
       Row({ space: 10 }) {
         Column({ space: 4 }) {
-          Text(`${rule.stockName}（${rule.stockCode}）`)
-            .fontSize(13).fontColor(Color.White)
+          Row({ space: 6 }) {
+            // ✅ 类型标识
+            Text(rule.quoteType === 'stock' ? '股票' : '指数')
+              .fontSize(10)
+              .fontColor('#AAAAAA')
+              .padding({ left: 6, right: 6, top: 2, bottom: 2 })
+              .backgroundColor('#1A1A1A')
+              .borderRadius(6)
+
+            Text(`${rule.stockName}（${rule.stockCode}）`)
+              .fontSize(13)
+              .fontColor(Color.White)
+          }
 
           Text(rule.conditionText)
-            .fontSize(11).fontColor('#BBBBBB')
-        }.layoutWeight(1)
+            .fontSize(11)
+            .fontColor('#BBBBBB')
+        }
+        .layoutWeight(1)
 
         Button('删除')
           .height(28)
@@ -2558,7 +2650,7 @@ struct HarmonyStockPage {
           .fontColor('#FF7875')
           .borderRadius(10)
           .onClick(async () => {
-            await this.deleteRule(rule.id);
+            await this.deleteRule(rule.id)
           })
       }
       .padding({ left: 16, right: 16, top: 10, bottom: 10 })
@@ -2567,4 +2659,14 @@ struct HarmonyStockPage {
     .margin({ bottom: 1 })
   }
 
+  @Builder
+  private buildRuleTypeChip(label: string, t: 'index' | 'stock') {
+    Text(label)
+      .fontSize(12)
+      .fontColor(this.ruleQuoteType === t ? '#FFFFFF' : '#AAAAAA')
+      .padding({ left: 10, right: 10, top: 6, bottom: 6 })
+      .backgroundColor(this.ruleQuoteType === t ? '#333333' : '#181818')
+      .borderRadius(10)
+      .onClick(() => { this.ruleQuoteType = t })
+  }
 }
