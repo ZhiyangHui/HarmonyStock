@@ -148,7 +148,9 @@ export class RuleEngine {
         id: 10000 + r.id,
         title: '行情提醒',
         text: `${r.stockName}（${r.stockCode}）${r.conditionText}，当前价 ${price.toFixed(2)}`,
-        additionalText: '打开应用查看详情'
+        additionalText: '打开应用查看详情',
+        bundleName: 'com.example.harmonystock',
+        abilityName: 'EntryAbility'
       }
 
       await NotifyCenter.publish(p)
