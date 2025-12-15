@@ -1571,19 +1571,6 @@ struct HarmonyStockPage {
   build() {
 
     Column() {
-
-      Button('发送一条测试通知')
-        .margin({ left: 16, right: 16, top: 8, bottom: 8 })
-        .onClick(async () => {
-          const rule: NotifyRule = {
-            id: 999,
-            stockCode: '300750',
-            stockName: '宁德时代',
-            conditionText: '价格 ≥ 220.00',
-            enabled: true
-          }
-          await this.triggerRuleAlert(rule)
-        })
       // 顶部标题栏
       this.buildHeader()
 
@@ -2026,9 +2013,10 @@ struct HarmonyStockPage {
                         width: this.selectedKlineIndex === idx ? 1 : 0,
                         color: this.selectedKlineIndex === idx ? '#FACC15' : '#000000'
                       })
-                      .onClick(() => {
-                        this.onKlineSelected(idx);
-                      })
+                      .parallelGesture(
+                        TapGesture().onAction(() => {
+                          this.onKlineSelected(idx)
+                        }))
                     }, (g: KlineGeom, idx: number) => `${idx}`)
                   }
                   .width(this.getKlineTotalWidth())
