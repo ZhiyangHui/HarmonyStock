@@ -10,10 +10,12 @@ import { ActiveFormState, APP_STORAGE_KEY_ACTIVE_FORM } from '../common/ActiveFo
 import notificationManager from '@ohos.notificationManager'
 import notification from '@ohos.notification'
 import { RuleEngine, NotifyRuleLite } from '../service/RuleEngine'
-
+import wantAgent from '@ohos.wantAgent'
 
 const DOMAIN = 0x0000
 const TAG: string = 'HarmonyStock'
+
+
 
 
 // ====== 通用行情结构（指数 / 股票） ======
@@ -204,6 +206,13 @@ struct HarmonyStockPage {
   // ✅ 加在这里（和其他状态字段放一起）
   @State activeFormId: string = ''
 
+  @State ruleStockCodeInput: string = ''
+  @State ruleOpIndex: number = 0        // 0: ≥  1: ≤
+  @State rulePriceInput: string = ''    // 阈值
+  @State ruleMsg: string = ''
+
+  @State notifyRulesVer: number = 0
+
   onPageShow() {
     hilog.error(0x0000, 'INDEX_DEBUG', '🔥 Index onPageShow CALLED')
 
@@ -283,22 +292,13 @@ struct HarmonyStockPage {
     }
   ];
 
-  private notifyRules: NotifyRule[] = [
-    {
-      id: 999,
-      stockCode: '300750',
-      stockName: '宁德时代',
-      conditionText: '价格 ≥ 1.00',
-      enabled: true
-    },
-    {
-      id: 2,
-      stockCode: '601012',
-      stockName: '隆基绿能',
-      conditionText: '价格 ≤ 28.00',
-      enabled: false
-    }
-  ];
+  @State notifyRules: NotifyRule[] = [
+    { id: 999, stockCode: '300750', stockName: '宁德时代', conditionText: '价格 ≥ 1.00', enabled: true },
+    { id: 2, stockCode: '601012', stockName: '隆基绿能', conditionText: '价格 ≤ 28.00', enabled: false }
+  ]
+
+  private nextRuleId: number = 1000
+  private readonly PREF_KEY_RULES: string = 'notify_rules_json'
 
   // ===== 通用：后端行情 -> 前端 Quote =====
   private mapBackendQuote(raw: BackendQuote, type: 'index' | 'stock'): Quote {
@@ -314,33 +314,23 @@ struct HarmonyStockPage {
 
   // ===== 页面生命周期 =====
   aboutToAppear() {
-    // 你原来的逻辑保持不动
     this.dbg('aboutToAppear:enter')
+
     this.loadGroupsFromPrefs().then(async () => {
-      this.dbg('aboutToAppear:afterLoadPrefs')
+      await this.loadNotifyRulesFromPrefs()   // ✅ 加这一句
       await this.preloadActiveGroupQuotes()
-      this.dbg('aboutToAppear:afterPreload')
       this.fetchQuotes(this.currentMode)
-      this.dbg('aboutToAppear:afterFetchQuotesCalled')
     })
 
     RuleEngine.start((): NotifyRuleLite[] => {
-      // 每次轮询取最新规则（避免你后续切换 enabled 后不生效）
       const out: NotifyRuleLite[] = []
       for (let i: number = 0; i < this.notifyRules.length; i++) {
         const r: NotifyRule = this.notifyRules[i]
-        out.push({
-          id: r.id,
-          stockCode: r.stockCode,
-          stockName: r.stockName,
-          conditionText: r.conditionText,
-          enabled: r.enabled
-        })
+        out.push({ id: r.id, stockCode: r.stockCode, stockName: r.stockName, conditionText: r.conditionText, enabled: r.enabled })
       }
       return out
     }, 5000, 10000)
   }
-
   aboutToDisappear(): void {
     RuleEngine.stop()
   }
@@ -1442,6 +1432,127 @@ struct HarmonyStockPage {
   }
 
 
+  private async loadNotifyRulesFromPrefs(): Promise<void> {
+    const pref = await preferences.getPreferences(getContext(this), this.PREF_FILE)
+    const jsonStr: string = (await pref.get(this.PREF_KEY_RULES, '')) as string
+
+    if (jsonStr.trim().length === 0) {
+      // 没存过：用默认 @State 的 notifyRules 即可，同时校准 nextRuleId
+      this.recomputeNextRuleId()
+      return
+    }
+
+    const parsed: NotifyRule[] = this.safeParseNotifyRules(jsonStr)
+    if (parsed.length > 0) {
+      this.notifyRules = parsed
+      this.recomputeNextRuleId()
+    }
+  }
+
+  private async saveNotifyRulesToPrefs(): Promise<void> {
+    const pref = await preferences.getPreferences(getContext(this), this.PREF_FILE)
+    const jsonStr: string = JSON.stringify(this.notifyRules)
+    await pref.put(this.PREF_KEY_RULES, jsonStr)
+    await pref.flush()
+  }
+
+  private safeParseNotifyRules(jsonStr: string): NotifyRule[] {
+    try {
+      const raw: Object = JSON.parse(jsonStr) as Object
+      if (!Array.isArray(raw)) return []
+
+      const arr: Object[] = raw as Object[]
+      const out: NotifyRule[] = []
+
+      for (let i: number = 0; i < arr.length; i++) {
+        const item: Record<string, Object> = arr[i] as Record<string, Object>
+
+        const id: number = Number(item['id'])
+        const stockCode: string = String(item['stockCode'] ?? '').trim()
+        const stockName: string = String(item['stockName'] ?? '').trim()
+        const conditionText: string = String(item['conditionText'] ?? '').trim()
+        const enabled: boolean = Boolean(item['enabled'])
+
+        if (!Number.isNaN(id) && stockCode.length === 6 && stockName.length > 0 && conditionText.length > 0) {
+          out.push({ id, stockCode, stockName, conditionText, enabled })
+        }
+      }
+      return out
+    } catch (e) {
+      return []
+    }
+  }
+
+  private recomputeNextRuleId(): void {
+    let maxId: number = 0
+    for (let i: number = 0; i < this.notifyRules.length; i++) {
+      if (this.notifyRules[i].id > maxId) maxId = this.notifyRules[i].id
+    }
+    this.nextRuleId = maxId + 1
+  }
+
+  private async addNotifyRuleFromUI(): Promise<void> {
+    const code: string = this.ruleStockCodeInput.trim()
+    if (code.length !== 6) {
+      this.ruleMsg = '请输入 6 位代码'
+      return
+    }
+
+    const v: number = Number(this.rulePriceInput.trim())
+    if (Number.isNaN(v)) {
+      this.ruleMsg = '请输入正确的价格阈值'
+      return
+    }
+
+    // 去重：同 code + 同条件 直接不加
+    const opText: string = (this.ruleOpIndex === 0) ? '≥' : '≤'
+    const cond: string = `价格 ${opText} ${v.toFixed(2)}`
+    for (let i: number = 0; i < this.notifyRules.length; i++) {
+      const r: NotifyRule = this.notifyRules[i]
+      if (r.stockCode === code && r.conditionText === cond) {
+        this.ruleMsg = '该规则已存在'
+        return
+      }
+    }
+
+    // 尽量从缓存/后端拿 name（你的 ensureQuoteCachedForCode 已有）
+    await this.ensureQuoteCachedForCode(code)
+    const q: Quote | null = this.findStockQuoteInCache(code)
+    const name: string = (q !== null) ? q.name : code
+
+    const newRule: NotifyRule = {
+      id: this.nextRuleId,
+      stockCode: code,
+      stockName: name,
+      conditionText: cond,
+      enabled: true
+    }
+    this.nextRuleId += 1
+
+    // ✅ 触发 UI：必须 new array
+    const next: NotifyRule[] = [newRule].concat(this.notifyRules)
+    this.notifyRules = next
+    this.notifyRulesVer += 1
+    await this.saveNotifyRulesToPrefs()
+
+    // 清空输入
+    this.ruleStockCodeInput = ''
+    this.rulePriceInput = ''
+    this.ruleMsg = '已添加并启用'
+  }
+
+  private async deleteRule(ruleId: number): Promise<void> {
+    const next: NotifyRule[] = []
+    for (let i: number = 0; i < this.notifyRules.length; i++) {
+      const r: NotifyRule = this.notifyRules[i]
+      if (r.id !== ruleId) next.push(r)
+    }
+    this.notifyRules = next
+    this.notifyRulesVer += 1
+    await this.saveNotifyRulesToPrefs()
+  }
+
+
 
   // ===== 自定义 TabBar：这里就能完全控制文字颜色 =====
   @Builder
@@ -2375,50 +2486,97 @@ struct HarmonyStockPage {
   private buildNotificationTab() {
     Column() {
       Row() {
-        Text('通知规则')
-          .fontSize(14)
-          .fontColor(Color.White)
+        Text('通知规则').fontSize(14).fontColor(Color.White)
         Blank()
-        Text('满足条件时震铃 + 系统通知（占位）')
-          .fontSize(10)
-          .fontColor('#777777')
+        Text('命中后：系统通知 + 震动（真机）')
+          .fontSize(10).fontColor('#777777')
       }
       .width('100%')
       .padding({ left: 16, right: 16, top: 12, bottom: 8 })
+
+      // ✅ 新增规则区
+      Column({ space: 8 }) {
+        Row({ space: 8 }) {
+          TextInput({ placeholder: '股票代码(6位)', text: this.ruleStockCodeInput })
+            .width('38%').height(32).fontSize(13)
+            .backgroundColor(Color.White).fontColor(Color.Black)
+            .onChange((v: string) => { this.ruleStockCodeInput = v.trim() })
+
+          // 操作符：用两个小按钮最稳，不用复杂 Picker
+          Row({ space: 6 }) {
+            Text('≥')
+              .fontSize(12)
+              .fontColor(this.ruleOpIndex === 0 ? '#FFFFFF' : '#AAAAAA')
+              .padding({ left: 10, right: 10, top: 6, bottom: 6 })
+              .backgroundColor(this.ruleOpIndex === 0 ? '#333333' : '#181818')
+              .borderRadius(10)
+              .onClick(() => { this.ruleOpIndex = 0 })
+
+            Text('≤')
+              .fontSize(12)
+              .fontColor(this.ruleOpIndex === 1 ? '#FFFFFF' : '#AAAAAA')
+              .padding({ left: 10, right: 10, top: 6, bottom: 6 })
+              .backgroundColor(this.ruleOpIndex === 1 ? '#333333' : '#181818')
+              .borderRadius(10)
+              .onClick(() => { this.ruleOpIndex = 1 })
+          }
+
+          TextInput({ placeholder: '阈值', text: this.rulePriceInput })
+            .width('24%').height(32).fontSize(13)
+            .backgroundColor(Color.White).fontColor(Color.Black)
+            .onChange((v: string) => { this.rulePriceInput = v.trim() })
+
+          Button('添加')
+            .height(32)
+            .onClick(async () => { await this.addNotifyRuleFromUI() })
+        }
+
+        if (this.ruleMsg.length > 0) {
+          Text(this.ruleMsg).fontSize(10).fontColor('#777777')
+        }
+      }
+      .padding({ left: 16, right: 16, bottom: 10 })
 
       List() {
         ForEach(this.notifyRules, (rule: NotifyRule) => {
           this.buildNotifyRuleItem(rule);
         }, (rule: NotifyRule) => rule.id.toString())
       }
+      .key(`notifyRules-${this.notifyRulesVer}`)  // 使用 notifyRulesVer 作为 key，确保每次更新时渲染
+
     }
     .width('100%')
     .height('100%')
     .backgroundColor(Color.Black)
   }
 
+
   @Builder
   private buildNotifyRuleItem(rule: NotifyRule) {
     ListItem() {
-      Row() {
+      Row({ space: 10 }) {
         Column({ space: 4 }) {
           Text(`${rule.stockName}（${rule.stockCode}）`)
-            .fontSize(13)
-            .fontColor(Color.White)
+            .fontSize(13).fontColor(Color.White)
+
           Text(rule.conditionText)
-            .fontSize(11)
-            .fontColor('#BBBBBB')
-        }
+            .fontSize(11).fontColor('#BBBBBB')
+        }.layoutWeight(1)
 
-        Blank()
-
-        Text(rule.enabled ? '启用' : '停用')
-          .fontSize(11)
-          .fontColor(rule.enabled ? '#39D98A' : '#777777')
+        Button('删除')
+          .height(28)
+          .padding({ left: 10, right: 10 })
+          .backgroundColor('#1A1A1A')
+          .fontColor('#FF7875')
+          .borderRadius(10)
+          .onClick(async () => {
+            await this.deleteRule(rule.id);
+          })
       }
       .padding({ left: 16, right: 16, top: 10, bottom: 10 })
       .backgroundColor('#101010')
     }
     .margin({ bottom: 1 })
   }
+
 }
