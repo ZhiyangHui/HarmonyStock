@@ -1,6 +1,7 @@
 import notificationManager from '@ohos.notificationManager'
 import notification from '@ohos.notification'
 import { hilog } from '@kit.PerformanceAnalysisKit'
+import { Haptics } from '../common/Haptics'
 
 const DOMAIN: number = 0x0000
 const TAG: string = 'HarmonyStock.Notify'
@@ -46,6 +47,8 @@ export class NotifyCenter {
     try {
       await notificationManager.publish(req)
       hilog.info(DOMAIN, TAG, 'publish ok id=%{public}d', req.id)
+      // ✅ 紧跟着触发震动（并在 Haptics 内打日志）
+      await Haptics.vibrateShort()
     } catch (e) {
       const errObj: Record<string, Object> = e as Record<string, Object>
       const codeNum: number = Number(errObj['code'])
