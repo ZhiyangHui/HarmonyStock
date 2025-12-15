@@ -62,45 +62,13 @@ struct QuoteWidget {
 
   @Builder
   private buildByDimension(): void {
-    if (this.dimension === '1*2') {
-      this.buildSmall()
-    } else if (this.dimension === '2*4') {
+   if (this.dimension === '2*4') {
       this.buildLarge()
     } else {
       this.buildMedium()
     }
   }
 
-  // ===== 1×2 =====
-  @Builder
-  private buildSmall(): void {
-    Column() {
-      Row() {
-        Text(this.name)
-          .fontSize(13)
-          .fontColor('#FFFFFF')
-        Blank()
-        Text(this.code)
-          .fontSize(10)
-          .fontColor('#666666')
-      }
-      .width('100%')
-
-      Text(this.priceText)
-        .fontSize(22)
-        .fontWeight(FontWeight.Bold)
-        .fontColor(this.isUp() ? '#FF4D4F' : '#39D98A')
-        .margin({ top: 6 })
-
-      Text(`${this.changeText}  ${this.pctText}`)
-        .fontSize(10)
-        .fontColor(this.isUp() ? '#FF7875' : '#6BE49B')
-        .margin({ top: 4 })
-    }
-    .padding(12)
-    .width('100%')
-    .height('100%')
-  }
 
   // ===== 2×2 =====
   @Builder

@@ -73,7 +73,8 @@
           "abilities": ["EntryAbility"],
           "when": "inuse"
         }
-      }
+      },
+
     ]
   }
 }

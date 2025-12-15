@@ -9,6 +9,7 @@ import { ActiveFormState, APP_STORAGE_KEY_ACTIVE_FORM } from '../common/ActiveFo
 
 import notificationManager from '@ohos.notificationManager'
 import notification from '@ohos.notification'
+import { RuleEngine, NotifyRuleLite } from '../service/RuleEngine'
 
 
 const DOMAIN = 0x0000
@@ -284,10 +285,10 @@ struct HarmonyStockPage {
 
   private notifyRules: NotifyRule[] = [
     {
-      id: 1,
+      id: 999,
       stockCode: '300750',
       stockName: '宁德时代',
-      conditionText: '价格 ≥ 220.00',
+      conditionText: '价格 ≥ 1.00',
       enabled: true
     },
     {
@@ -322,10 +323,26 @@ struct HarmonyStockPage {
       this.fetchQuotes(this.currentMode)
       this.dbg('aboutToAppear:afterFetchQuotesCalled')
     })
+
+    RuleEngine.start((): NotifyRuleLite[] => {
+      // 每次轮询取最新规则（避免你后续切换 enabled 后不生效）
+      const out: NotifyRuleLite[] = []
+      for (let i: number = 0; i < this.notifyRules.length; i++) {
+        const r: NotifyRule = this.notifyRules[i]
+        out.push({
+          id: r.id,
+          stockCode: r.stockCode,
+          stockName: r.stockName,
+          conditionText: r.conditionText,
+          enabled: r.enabled
+        })
+      }
+      return out
+    }, 5000, 10000)
   }
 
   aboutToDisappear(): void {
-
+    RuleEngine.stop()
   }
 
   // ===== 拉取行情列表（指数 / 股票共用） =====
