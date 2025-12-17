@@ -1160,85 +1160,128 @@ struct HarmonyStockPage {
 
 
   private findQuoteInCaches(code: string): Quote | null {
+    // 传进来的可能带空格（比如输入框/剪贴板），先做一次标准化
     const code6: string = code.trim();
+    // 我们的后端/数据约定都是 6 位代码；不符合就直接当作无效输入
     if (code6.length !== 6) return null;
 
+    // 缓存里的 key 统一做了前缀区分：stock-xxxxxx / index-xxxxxx
+    // 这里先按股票查一次（大部分场景用户更常选股票）
     const kStock: string = `stock-${code6}`;
     const vStock: Quote | undefined = this.quoteCache.get(kStock);
     if (vStock !== undefined) return vStock;
 
+    // 股票没找到，再按指数查一次
     const kIndex: string = `index-${code6}`;
     const vIndex: Quote | undefined = this.quoteCache.get(kIndex);
     if (vIndex !== undefined) return vIndex;
 
+    // 两类都没有，说明缓存里确实没有这个标的
     return null;
   }
 
   private getStockRowName(s: StockRef): string {
+    // 这里“读一下 quoteCacheVer”是为了让 UI 依赖到缓存版本号：
+    // 只要行情缓存被更新并且你递增了 quoteCacheVer，这一行就会重新计算、重新渲染名称。
     const _qv: number = this.quoteCacheVer
+
+    // 优先从缓存里拿“最新行情对应的名字”（最权威，能自动跟随后端修正/补全）
     const q: Quote | null = this.findStockQuoteInCache(s.code);
 
     if (q !== null) {
       return q.name;
     }
+
+    // 缓存没命中时，退一步用 StockRef 里保存过的 name（比如第一次添加自选时写进去的）
     if (s.name && s.name.length > 0) {
       return s.name;
     }
+
+    // 两边都没有就给个占位符，避免 UI 显示空字符串
     return '—';
   }
 
+  // 用于在自选列表里展示某只股票的“当前价”文本（优先用缓存行情，没有就给占位符）
   private getStockRowPriceText(s: StockRef): string {
+    // 同 getStockRowName：读一下 quoteCacheVer，确保缓存版本变化时这一行会触发重算/刷新
     const _qv: number = this.quoteCacheVer
-    const q: Quote | null = this.findStockQuoteInCache(s.code);
 
-    return (q !== null) ? q.price.toFixed(2) : '--';
+    // 尝试从行情缓存里拿到该股票的最新报价
+    const q: Quote | null = this.findStockQuoteInCache(s.code)
+
+    // 有行情：按 2 位小数展示；没行情：用占位符，避免出现 NaN/空白
+    return (q !== null) ? q.price.toFixed(2) : '--'
   }
 
+  // 用于在自选列表里展示某只股票的“涨跌额”文本（优先用缓存行情，没有就给占位符）
   private getStockRowChangeText(s: StockRef): string {
+    // 读一下 quoteCacheVer，确保缓存行情更新时这一行会跟着刷新
     const _qv: number = this.quoteCacheVer
-    const q: Quote | null = this.findStockQuoteInCache(s.code);
 
-    return (q !== null) ? q.change.toFixed(2) : '--';
+    // 尝试从行情缓存里拿到该股票的最新报价
+    const q: Quote | null = this.findStockQuoteInCache(s.code)
+
+    // 有行情：按 2 位小数展示涨跌额；没行情：用占位符
+    return (q !== null) ? q.change.toFixed(2) : '--'
   }
 
+  // 用于在自选列表里展示某只股票的“涨跌幅(%)”文本（优先用缓存行情，没有就给占位符）
   private getStockRowPctText(s: StockRef): string {
+    // 读一下 quoteCacheVer，确保缓存行情更新时这一行会跟着刷新
     const _qv: number = this.quoteCacheVer
-    const q: Quote | null = this.findStockQuoteInCache(s.code);
 
-    return (q !== null) ? (q.changePercent.toFixed(2) + '%') : '--';
+    // 尝试从行情缓存里拿到该股票的最新报价
+    const q: Quote | null = this.findStockQuoteInCache(s.code)
+
+    // 有行情：保留 2 位小数并补上 %；没行情：用占位符
+    return (q !== null) ? (q.changePercent.toFixed(2) + '%') : '--'
   }
 
+  // 用于在自选列表里决定“价格数字”的颜色：涨(含0)用红色，跌用绿色；没拿到行情就用灰色占位
   private getStockRowPriceColor(s: StockRef): string {
+    // 读一下 quoteCacheVer，确保行情缓存更新时，这个颜色也会触发重新计算/渲染
     const _qv: number = this.quoteCacheVer
-    const q: Quote | null = this.findStockQuoteInCache(s.code);
 
+    // 从缓存里取这只股票的最新行情（拿不到就返回 null）
+    const q: Quote | null = this.findStockQuoteInCache(s.code)
+
+    // 没行情：统一用灰色，避免 UI 出现“红绿乱跳”
     if (q === null) {
-      return '#AAAAAA';
+      return '#AAAAAA'
     }
-    return (q.change >= 0) ? '#FF4D4F' : '#39D98A';
+
+    // 有行情：按涨跌决定颜色（change >= 0 也算“涨/平”，走红色）
+    return (q.change >= 0) ? '#FF4D4F' : '#39D98A'
   }
 
+  // 用于在自选列表里决定“副文本/辅助信息”（比如涨跌额、涨跌幅一类）显示的颜色：涨(含0)用浅红，跌用浅绿；没拿到行情就用更暗的灰
   private getStockRowSubColor(s: StockRef): string {
+    // 读一下 quoteCacheVer，确保行情缓存更新时，这个颜色也会跟着触发重新计算/渲染
     const _qv: number = this.quoteCacheVer
-    const q: Quote | null = this.findStockQuoteInCache(s.code);
+    const q: Quote | null = this.findStockQuoteInCache(s.code)
 
+    // 没有行情数据：副文本用深一点的灰色，和主价格的灰区分开
     if (q === null) {
-      return '#777777';
+      return '#777777'
     }
-    return (q.change >= 0) ? '#FF7875' : '#6BE49B';
+
+    // 有行情：涨用浅红、跌用浅绿（比主价格色更“柔和”，不抢主视觉）
+    return (q.change >= 0) ? '#FF7875' : '#6BE49B'
   }
 
+  // 确保某个股票 code 的行情已经进了 quoteCache：如果缓存里没有，就补一次 by_code 请求把它拉进来（主要给自选统计/列表兜底用）
   private async ensureQuoteCachedForCode(code: string): Promise<void> {
     const code6: string = code.trim()
     if (code6.length !== 6) return
 
-    // ✅ 仅检查 stock 缓存，避免 index 同码导致误判
+    // 这里只看 stock-${code} 这一条缓存：避免“指数/股票同码”时，被 index 缓存误判成已经有数据
     const cacheKey: string = `stock-${code6}`
     const existed: Quote | undefined = this.quoteCache.get(cacheKey)
     if (existed !== undefined) return
 
     const httpRequest = http.createHttp()
     try {
+      // 补拉单个股票行情：只要成功写入 cache，后续统计/列表就能用缓存值算出来
       const url: string = `http://101.43.185.73:8000/api/quote/by_code?type=stock&code=${code6}`
       const res = await httpRequest.request(url, {
         method: http.RequestMethod.GET,
@@ -1250,131 +1293,185 @@ struct HarmonyStockPage {
       if (res.responseCode === 200 && res.result) {
         const backendItem: BackendQuote = JSON.parse(res.result as string) as BackendQuote
         const q: Quote = this.mapBackendQuote(backendItem, 'stock')
-        this.mergeQuotesToCache([q]) // ✅ quoteCacheVer++ 会触发统计卡刷新
-        this.dbg(`ensureQuoteCachedForCode:request ${code6}`)
+
+        // mergeQuotesToCache 内部会更新 quoteCache + quoteCacheVer，
+        // quoteCacheVer 变化会让依赖缓存的 UI（比如统计卡）刷新
+        this.mergeQuotesToCache([q])
+        this.dbg(`ensureQuoteCachedForCode:cached ${code6}`)
       }
     } catch (e) {
-      // ignore
+      // 这里是“兜底补拉”，失败就算了，不要影响主流程（UI 仍然可以显示 '--'）
     } finally {
       httpRequest.destroy()
     }
   }
 
+  // 按 type（index/stock）兜底补拉单个标的行情：如果 quoteCache 里还没有，就调用 by_code 接口拉一次并写入缓存
   private async ensureQuoteCachedByType(type: QuoteType, code6: string): Promise<void> {
     const code: string = code6.trim()
     if (code.length !== 6) return
 
+    // 缓存 key 统一用 `${type}-${code}`：同一代码在指数/股票下也能共存，不会互相覆盖
     const cacheKey: string = `${type}-${code}`
     const existed: Quote | undefined = this.quoteCache.get(cacheKey)
     if (existed !== undefined) return
 
     const httpRequest = http.createHttp()
     try {
+      // 只补拉这一条：用于“列表/统计/卡片”在缺行情时的兜底，不影响主 fetchQuotes 流程
       const url: string = `http://101.43.185.73:8000/api/quote/by_code?type=${type}&code=${code}`
       const res = await httpRequest.request(url, {
         method: http.RequestMethod.GET,
         connectTimeout: this.HTTP_CONNECT_TIMEOUT,
         readTimeout: this.HTTP_READ_TIMEOUT
       })
+
       if (res.responseCode === 200 && res.result) {
         const backendItem: BackendQuote = JSON.parse(res.result as string) as BackendQuote
+
+        // 后端字段映射 + 填上 type，保持 Quote 结构一致（指数/股票一套逻辑）
         const q: Quote = this.mapBackendQuote(backendItem, type)
+
+        // 写入 quoteCache；mergeQuotesToCache 通常会顺带 bump quoteCacheVer，触发依赖缓存的 UI 刷新
         this.mergeQuotesToCache([q])
       }
     } catch (e) {
-      // ignore
+      // 兜底补拉失败就忽略：最多让 UI 显示 '--'，不要把错误扩散到页面主流程
     } finally {
       httpRequest.destroy()
     }
   }
 
+  // 按 type（index/stock）+ code 从 quoteCache 里取一条行情；取不到就返回 null
   private findQuoteInCacheByType(type: QuoteType, code6: string): Quote | null {
     const code: string = code6.trim()
     if (code.length !== 6) return null
+
+    // 缓存 key 规则：`${type}-${code}`，确保指数和股票同码也不会互相顶掉
     const k: string = `${type}-${code}`
+
+    // Map.get 取不到会是 undefined，这里统一转成 null，外面写判断更顺手
     const v: Quote | undefined = this.quoteCache.get(k)
     return (v !== undefined) ? v : null
   }
 
+  // 预热当前分组里所有股票的行情到缓存（quoteCache），让自选列表/统计卡能尽快拿到最新数据
   private async preloadActiveGroupQuotes(): Promise<void> {
-    const g: StockGroup | null = this.getActiveGroup();
+    const g: StockGroup | null = this.getActiveGroup()
     if (g === null) {
-      return;
+      // 没有选中分组（或分组不存在）就不用做任何事
+      return
     }
 
-    const tasks: Promise<void>[] = [];
+    // 每只股票对应一个“确保缓存存在”的请求任务
+    const tasks: Promise<void>[] = []
     for (let i: number = 0; i < g.stocks.length; i++) {
-      const code: string = g.stocks[i].code;
-      tasks.push(this.ensureQuoteCachedForCode(code));
+      const code: string = g.stocks[i].code
+      tasks.push(this.ensureQuoteCachedForCode(code))
     }
 
-    // 并行预热：单只失败不会阻塞整体
-    await Promise.all(tasks.map((p: Promise<void>) => p.catch(() => { })));
-
+    // 并行预热：某一只失败也不影响其它（避免因为单个接口异常导致整组卡住）
+    await Promise.all(tasks.map((p: Promise<void>) => p.catch(() => { })))
   }
 
+  // 把最新拉到的行情合并进本地 quoteCache（key = `${type}-${code}`），同时触发统计刷新
   private mergeQuotesToCache(list: Quote[]): void {
     console.info(`[DBG] mergeQuotesToCache: in list=${list.length} oldCache=${this.quoteCache.size}`);
+
+    // 用“新 Map”拷贝一份旧缓存：避免直接在原 Map 上改导致状态变更不明显（也方便统一替换）
     const newMap: Map<string, Quote> = new Map<string, Quote>();
     this.quoteCache.forEach((v: Quote, k: string) => {
       newMap.set(k, v);
     });
 
+    // 把这次请求回来的行情逐条写入缓存：同 key 会覆盖旧值（相当于更新）
     for (let i: number = 0; i < list.length; i++) {
       const q: Quote = list[i];
-      const key: string = `${q.type}-${q.code}`;
+      const key: string = `${q.type}-${q.code}`; // stock-300750 / index-000001 这种，避免同码冲突
       newMap.set(key, q);
     }
 
+    // 一次性替换缓存引用，配合版本号让依赖方（统计/列表）知道“缓存更新过了”
     this.quoteCache = newMap;
-    this.quoteCacheVer += 1
-    this.refreshActiveGroupStats()   // ✅ 新增：行情变了，统计（up/down/avg）立刻刷新
+    this.quoteCacheVer += 1;
+
+    // 行情一变，自选分组的涨跌统计（up/down/avg）也要跟着立刻刷新
+    this.refreshActiveGroupStats();
+
     console.info(`[DBG] mergeQuotesToCache: out newCache=${this.quoteCache.size}`);
   }
 
-
+  // 取当前“选中的分组”（activeGroupId 对应的那一个）；如果当前没有选中分组或找不到，就返回 null
   private getActiveGroupOrNull(): StockGroup | null {
+    // activeGroupId < 0 表示当前没选中任何分组（比如刚启动还没初始化完，或已经删光了）
     if (this.activeGroupId < 0) return null
+
+    // 在 groups 数组里找 activeGroupId 对应的下标
     const idx: number = this.findGroupIndex(this.activeGroupId)
+
+    // 没找到说明数据不同步/分组被删了，兜底返回 null
     if (idx < 0) return null
+
+    // 找到就直接返回这个分组对象
     return this.groups[idx]
   }
 
+  // 顶部/统计区用的：拿到当前选中分组的名称，没选中就返回空字符串
   private getActiveGroupNameText(): string {
+    // 先尝试取当前 active 分组对象（可能为 null）
     const g: StockGroup | null = this.getActiveGroupOrNull()
+
+    // 有分组就显示它的 name；没有就显示空（UI 一般会自然不展示）
     return g ? g.name : ''
   }
 
+  // 返回当前选中分组的股票列表（用于渲染“自选列表”等 UI）；如果当前没有有效分组就返回空数组
   private getActiveGroupStocksList(): StockRef[] {
+    // 先拿到当前 activeGroupId 对应的分组对象（可能为空）
     const g: StockGroup | null = this.getActiveGroupOrNull()
+
+    // 有分组就返回它的 stocks；没有就返回空数组，避免 UI/调用方再做空判断
     return g ? g.stocks : []
   }
 
+  // 根据“当前分组里的股票列表 + 已缓存的行情数据”，计算分组统计卡要显示的几个数字（总数/涨/跌/平均涨跌幅）
   private computeStatsFromStocks(list: StockRef[]): ActiveGroupStats {
+    // 分组里一共多少只股票：这个不依赖行情缓存，直接用列表长度就行
     const stockCount: number = list.length
 
+    // up/down：统计今天涨/跌的数量（只统计拿得到行情的那部分）
     let up: number = 0
     let down: number = 0
+
+    // 平均涨跌幅：累加 percent，最后除以有效数量
     let sumPct: number = 0
     let cntPct: number = 0
 
     for (let i: number = 0; i < list.length; i++) {
       const code: string = list[i].code
-      // const q: Quote | null = this.findQuoteInCaches(code)
+
+      // 从缓存里找这只股票的行情（这里只算股票，所以用 findStockQuoteInCache，避免 index 同码干扰）
+      // 如果这只股票还没拉到行情（缓存里没有），就先跳过，不把它算进平均值
       const q: Quote | null = this.findStockQuoteInCache(code)
+
       if (q !== null) {
+        // change >= 0 当作“上涨/不跌”（包含 0 的情况）
         if (q.change >= 0) {
           up += 1
         } else {
           down += 1
         }
+
+        // 只要有行情，就把涨跌幅纳入平均值的统计
         sumPct += q.changePercent
         cntPct += 1
       }
     }
 
+    // 如果一只行情都没拿到，就显示 “--”，避免出现 NaN%
     const avgPct: string = (cntPct > 0) ? ((sumPct / cntPct).toFixed(2) + '%') : '--'
 
+    // 统计卡那边用的是 string，所以这里统一转成字符串返回
     return {
       stockCount: stockCount.toString(),
       up: up.toString(),
@@ -1383,61 +1480,47 @@ struct HarmonyStockPage {
     }
   }
 
-  private getActiveGroupStatsStockCount(): string {
-    const _av: number = this.activeStocksVer     // ✅ 让“增删股票”触发刷新
-    const _qv: number = this.quoteCacheVer       // ✅ 让“行情回写”触发刷新
-    const st: ActiveGroupStats = this.computeStatsFromStocks(this.activeStocks)
-    return st.stockCount
-  }
-
-  private getActiveGroupStatsUp(): string {
-    const _av: number = this.activeStocksVer
-    const _qv: number = this.quoteCacheVer
-    const st: ActiveGroupStats = this.computeStatsFromStocks(this.activeStocks)
-    return st.up
-  }
-
-  private getActiveGroupStatsDown(): string {
-    const _av: number = this.activeStocksVer
-    const _qv: number = this.quoteCacheVer
-    const st: ActiveGroupStats = this.computeStatsFromStocks(this.activeStocks)
-    return st.down
-  }
-
-  private getActiveGroupStatsAvgPct(): string {
-    const _av: number = this.activeStocksVer
-    const _qv: number = this.quoteCacheVer
-    const st: ActiveGroupStats = this.computeStatsFromStocks(this.activeStocks)
-    return st.avgPct
-  }
-
-  // ✅ 自选分组专用：只按 stock 查缓存，避免与 index 同码冲突（如 000001）
+  // 只从缓存里找“股票”行情：给自选分组用，避免 index/stock 代码相同（比如 000001）时拿错数据
   private findStockQuoteInCache(code: string): Quote | null {
+    // 先做一次最基本的清洗，避免用户输入/存储里带空格
     const code6: string = code.trim()
-    if (code6.length !== 6) return null
+    if (code6.length !== 6) return null  // 不是 6 位代码就直接当无效
 
+    // 缓存的 key 统一用 `${type}-${code}`，这里固定查 stock
     const kStock: string = `stock-${code6}`
+
+    // Map.get 取不到会返回 undefined，这里显式处理成 null，外层判断更直观
     const v: Quote | undefined = this.quoteCache.get(kStock)
     return (v !== undefined) ? v : null
   }
 
-
-
   private logSeq: number = 0;
 
+  // 统一的调试日志：把当前页面关键状态打一行出来，方便你追“分组 / 缓存 / UI 切换”到底哪里没同步
   private dbg(tag: string): void {
+    // 给每条日志一个递增序号，排查异步流程时更容易按顺序对齐
     this.logSeq += 1;
 
+    // 当前选中的分组 id（-1 表示还没选中/没有分组）
     const gid: number = this.activeGroupId;
+
+    // activeGroupId 在 groups 里的下标；找不到就会是 -1
     const idx: number = this.findGroupIndex(gid);
 
+    // 默认先给“无效值”，避免 idx=-1 时访问数组越界
     let activeCount: number = -1;
     let activeName: string = '';
+
+    // 只有 idx 合法时才读取分组信息（分组名、分组里股票数量）
     if (idx >= 0) {
       activeCount = this.groups[idx].stocks.length;
       activeName = this.groups[idx].name;
     }
 
+    // 一条日志尽量把你排查时最常看的状态都带上：
+    // - 当前在哪个 Tab / 行情模式（指数 or 股票）
+    // - 当前 activeGroupId 是否有效、对应的分组名、分组里有多少只
+    // - groups 总数、缓存条目数、activeStocks 数量、缓存版本号（用来确认 UI 是否应该刷新）
     console.info(
       `[DBG#${this.logSeq}] ${tag} | tab=${this.currentTabIndex} mode=${this.currentMode}` +
         ` | activeGroupId=${gid} activeIdx=${idx} activeName=${activeName} activeStocks=${activeCount}` +
@@ -1446,220 +1529,265 @@ struct HarmonyStockPage {
     );
   }
 
+  // 同步“当前选中分组”的股票列表到 activeStocks（UI 列表、统计卡都走这条链路）
   private syncActiveStocks(): void {
+    // 先拿到当前 activeGroupId 对应的分组；拿不到就当作没有选中分组
     const g: StockGroup | null = this.getActiveGroupOrNull()
+
     if (g === null) {
+      // 没有有效分组：自选列表清空
       this.activeStocks = []
     } else {
-      // 关键：必须创建“新数组引用”
+      // 这里用 slice() 是为了拿到一个“新的数组引用”
+      // ArkUI 的状态更新更依赖引用变化：直接用 g.stocks 可能导致 UI 认为“还是同一个数组”而不刷新
       this.activeStocks = g.stocks.slice()
     }
+
+    // 用一个版本号配合 key/依赖，强制相关 List 或统计区域在需要时重新渲染
     this.activeStocksVer += 1
 
+    // activeStocks 变了，顺手把统计（数量 / 涨跌数 / 平均涨幅）也刷新一下
     this.refreshActiveGroupStats()
   }
 
+  // 返回某个分组的“平均涨跌幅”展示文本（用于分组列表里的那一行数据）
   private getGroupAvgPctText(groupId: number): string {
-    // ✅ 依赖缓存版本：行情更新 => quoteCacheVer++ => 这里会重新计算 => UI 重绘
+    // 这里故意读一下 quoteCacheVer，让 ArkUI 知道这个返回值依赖行情缓存。
+    // 行情一更新（mergeQuotesToCache 里 quoteCacheVer++），分组行里的平均涨幅就会跟着重算/重绘。
     const _qv: number = this.quoteCacheVer
 
+    // 先找到分组在 groups 数组里的位置；找不到就给一个占位文本
     const idx: number = this.findGroupIndex(groupId)
     if (idx < 0) return '--'
 
+    // 统计是“现算现用”：用该分组的 stocks 列表去缓存里找最新 quote，再算平均涨跌幅
     const st: ActiveGroupStats = this.computeStatsFromStocks(this.groups[idx].stocks)
     return st.avgPct
   }
 
+  // 计算某个分组“平均涨跌幅”对应的展示颜色：涨用红色、跌用绿色、没数据用灰色
   private getGroupAvgPctColor(groupId: number): string {
-    // ✅ 依赖行情缓存版本，保证行情变化时颜色也刷新
+    // 读一下缓存版本号，让 ArkUI 知道：行情缓存变了，这个颜色也要跟着重新算/刷新
     const _qv: number = this.quoteCacheVer
 
+    // 根据 groupId 找到分组下标；找不到就给一个默认灰色
     const idx: number = this.findGroupIndex(groupId)
     if (idx < 0) return '#777777'
 
+    // 复用现成的统计逻辑，拿到该分组的 avgPct（形如 "1.23%" 或 "--"）
     const st: ActiveGroupStats = this.computeStatsFromStocks(this.groups[idx].stocks)
     const avg: string = st.avgPct
 
-    // 没有行情
+    // 没有可用行情时 avgPct 会是 "--"，这时候用灰色
     if (avg === '--') {
       return '#777777'
     }
 
-    // 去掉 %
+    // avgPct 是字符串带 "%"，这里去掉百分号后转成数字，方便判断正负
     const v: number = Number(avg.replace('%', ''))
     if (Number.isNaN(v)) {
       return '#777777'
     }
 
-    // ✅ 涨红，跌绿（按你当前全局配色）
+    // v >= 0 认为是上涨（红），v < 0 认为是下跌（绿）
     return v >= 0 ? '#FF4D4F' : '#39D98A'
   }
 
-  // ✅ 方案1第三步：把 Quote 转成桌面卡片绑定数据
+
+  // 把一条行情 Quote 整理成“桌面卡片”需要的绑定数据（主要是把数值转成可直接展示的字符串）
   private buildWidgetDataFromQuote(q: Quote): WidgetBindData {
+    // 桌面卡片上通常会显示“更新时间”，这里用本地时间拼一个 HH:mm
     const now: Date = new Date()
     const hh: string = now.getHours().toString().padStart(2, '0')
     const mm: string = now.getMinutes().toString().padStart(2, '0')
 
     return {
+      // 当前这张卡片的实例 id（从 AppStorageV2 消费过来），后面更新卡片时要靠它定位到哪张卡
       formId: this.activeFormId,
+
+      // 卡片标题：指数 / 股票（给用户一眼分清楚当前绑定的是哪种标的）
       title: (q.type === 'index') ? '指数' : '股票',
+
+      // 标的基本信息：代码、名称
       code: q.code,
       name: q.name,
+
+      // 价格/涨跌/涨跌幅都转成“直接可显示”的文本，避免卡片侧再做格式化
       priceText: q.price.toFixed(2),
       changeText: q.change.toFixed(2),
       pctText: q.changePercent.toFixed(2) + '%',
+
+      // 更新时间（只做到分钟级别，足够让人判断是不是刚刷新）
       tsText: `${hh}:${mm}`,
+
+      // 这两个开关一般用于卡片上的“上一只/下一只”按钮是否可点（你这里先固定为 true）
       hasPrev: true,
       hasNext: true
     }
   }
 
-  // ✅ 方案1第三步：如果是从桌面卡片打开的 App（activeFormId 有值），就把当前选择回写到卡片
+  // 如果这次是从桌面卡片点进来的（activeFormId 有值），就把“当前选中的标的”回写到那张卡片上
   private async updateWidgetIfLaunchedFromForm(q: Quote): Promise<void> {
+    // formId 可能带空格，先 trim 一下，避免更新失败还不好排查
     const fid: string = this.activeFormId.trim()
 
     hilog.error(DOMAIN, TAG, '[WIDGET] ENTER updateWidget fid=%{public}s code=%{public}s', fid, q.code)
 
+    // 没有 formId 说明不是从卡片启动的，或者 formId 还没消费到，直接跳过
     if (fid.length === 0) {
       hilog.error(DOMAIN, TAG, '[WIDGET] SKIP activeFormId empty')
       return
     }
 
     try {
+      // 把当前 Quote 转成卡片侧能直接展示的绑定数据（字符串化、带时间戳等）
       const data: WidgetBindData = this.buildWidgetDataFromQuote(q)
+
+      // FormKit 需要的是 FormBindingData，这里把普通对象包装一下
       const binding: formBindingData.FormBindingData = formBindingData.createFormBindingData(data)
 
+      // 更新桌面上那张 formId 对应的卡片内容
       await formProvider.updateForm(fid, binding)
 
       hilog.error(DOMAIN, TAG, '[WIDGET] OK updateForm formId=%{public}s code=%{public}s', fid, q.code)
     } catch (e) {
-      hilog.error(DOMAIN, TAG, '[WIDGET] FAIL updateForm formId=%{public}s err=%{public}s',
-        fid, JSON.stringify(e))
+      // 更新失败通常是 formId 不对、卡片已被移除、或数据结构不匹配，这里打出来方便定位
+      hilog.error(
+        DOMAIN,
+        TAG,
+        '[WIDGET] FAIL updateForm formId=%{public}s err=%{public}s',
+        fid,
+        JSON.stringify(e)
+      )
     }
   }
 
+  // 从 AppStorageV2 里“拿一次”桌面卡片传来的 formId：同步到页面字段后立刻清空，避免重复触发
+  private consumeFormIdFromAppStorageV2(from: string): void {
+    const st: ActiveFormState | undefined =
+      AppStorageV2.connect(ActiveFormState, APP_STORAGE_KEY_ACTIVE_FORM, () => new ActiveFormState())
 
-
-  private async triggerRuleAlert(rule: NotifyRule): Promise<void> {
-    try {
-      // 先尝试拉起通知授权弹窗（若已开启，通常不会影响；若未开启会提示用户开启）
-      // 若用户拒绝，常见错误码为 1600004
-      try {
-        await notificationManager.requestEnableNotification()
-      } catch (e) {
-        // 不使用 any/unknown：只做最保守处理
-        const errObj: Record<string, Object> = e as Record<string, Object>
-        const codeNum: number = Number(errObj['code'])
-        hilog.error(DOMAIN, TAG, 'requestEnableNotification failed: %{public}s', JSON.stringify(e))
-
-        // 1600004：用户拒绝/通知未授权（或已被关闭）
-        if (codeNum === 1600004) {
-          // 这里你可以改成 UI 提示：引导用户到系统设置开启通知
-          return
-        }
-      }
-
-      const req: notificationManager.NotificationRequest = {
-        id: 10000 + rule.id,
-        content: {
-          // 关键：用 notificationContentType（不是 contentType）
-          notificationContentType: notificationManager.ContentType.NOTIFICATION_CONTENT_BASIC_TEXT,
-          normal: {
-            title: '行情提醒',
-            text: `${rule.stockName}（${rule.stockCode}）${rule.conditionText}`,
-            additionalText: '打开应用查看详情'
-          }
-        }
-        // slotType / wantAgent / autoDeleted：先都不写，避免你当前 SDK 枚举/类型不一致导致编译或运行失败
-      }
-
-      await notificationManager.publish(req)
-      hilog.info(DOMAIN, TAG, 'triggerRuleAlert ok, id=%{public}d', req.id)
-    } catch (e) {
-      hilog.error(DOMAIN, TAG, 'triggerRuleAlert failed: %{public}s', JSON.stringify(e))
+    // 连接失败就直接返回（后续也没法同步桌面卡片）
+    if (!st) {
+      hilog.error(DOMAIN, TAG, '[%{public}s] AppStorageV2.connect failed', from)
+      return
     }
+
+    const fid: string = st.formId
+    if (fid.length === 0) {
+      // 不是从卡片进来的 / 已经被消费过
+      hilog.info(DOMAIN, TAG, '[%{public}s] no formId in ActiveFormState', from)
+      return
+    }
+
+    // 记到页面上，后面 updateForm 要用
+    this.activeFormId = fid
+
+    // 用完就清掉，避免 onPageShow / onResume 多次进来重复消费
+    st.formId = ''
+
+    hilog.info(DOMAIN, TAG, '[%{public}s] consumed formId=%{public}s', from, fid)
   }
 
-
-
-  // ✅ 先检查通知是否开启；没开就拉起系统授权/开关页面
+  // 确保系统通知权限/开关已打开：没开就引导用户去系统界面打开，最后返回是否可用
   private async ensureNotificationEnabled(): Promise<boolean> {
     try {
+      // 先查一次当前应用的通知开关状态（系统层面的总开关/权限）
       const enabled: boolean = await notificationManager.isNotificationEnabled()
       if (enabled) {
         return true
       }
 
-      // 拉起系统界面让用户打开通知开关
+      // 没开的话，拉起系统的通知开关/授权页面，让用户手动打开
       await notificationManager.requestEnableNotification()
 
-      // 用户操作后再检查一次
+      // 用户从系统页面返回后，再查一次，确认最终结果
       const enabled2: boolean = await notificationManager.isNotificationEnabled()
       return enabled2
     } catch (e) {
-      // 任意异常都视为不可用
+      // 这里不强行抛错：通知不可用就按不可用处理，避免影响主流程
       return false
     }
   }
 
-  // ✅ 专门处理 publish 的 1600004：提示 + 引导开启
-  private async handlePublishError(code: number): Promise<void> {
-    if (code === 1600004) {
-      // 你可以用你现有的 UI 状态字段提示用户
-      this.watchlistMsg = '通知权限未开启：请在系统设置中为 HarmonyStock 打开通知后重试'
-      // 再主动拉起一次系统开关界面
-      await this.ensureNotificationEnabled()
-    }
-  }
-
-
+  // 从本地偏好（Preferences）里把“通知规则列表”读出来，恢复到 notifyRules；顺便把 nextRuleId 校准到不会撞号
   private async loadNotifyRulesFromPrefs(): Promise<void> {
+    // 打开（或创建）这个应用自己的偏好存储文件：PREF_FILE 是文件名，不是路径
     const pref = await preferences.getPreferences(getContext(this), this.PREF_FILE)
+
+    // 用 PREF_KEY_RULES 这把“键”取出之前保存的规则 JSON 字符串；取不到就给空串
     const jsonStr: string = (await pref.get(this.PREF_KEY_RULES, '')) as string
 
+    // 为空说明以前没保存过规则：保持当前 @State notifyRules 默认值即可
+    // 同时把 nextRuleId 按当前规则最大 id 重新算一遍，避免后续新增规则 id 冲突
     if (jsonStr.trim().length === 0) {
-      // 没存过：用默认 @State 的 notifyRules 即可，同时校准 nextRuleId
       this.recomputeNextRuleId()
       return
     }
 
+    // 有内容则按我们的结构做一次“安全解析”（字段缺失/类型不对会被过滤）
     const parsed: NotifyRule[] = this.safeParseNotifyRules(jsonStr)
+
+    // 解析出来确实有有效规则，才覆盖到页面状态；然后同样校准 nextRuleId
     if (parsed.length > 0) {
       this.notifyRules = parsed
       this.recomputeNextRuleId()
     }
   }
 
+
+  // 把当前内存里的 notifyRules 序列化成 JSON，写回到 Preferences（下次启动/回到页面还能恢复）
   private async saveNotifyRulesToPrefs(): Promise<void> {
+    // 打开（或创建）本应用的偏好存储文件（PREF_FILE 是文件名标识）
     const pref = await preferences.getPreferences(getContext(this), this.PREF_FILE)
+
+    // notifyRules 是对象数组，Preferences 只能存基础类型，所以这里转成 JSON 字符串再存
     const jsonStr: string = JSON.stringify(this.notifyRules)
+
+    // 用 PREF_KEY_RULES 作为“键”把这串 JSON 保存进去（同一个键会覆盖旧值）
     await pref.put(this.PREF_KEY_RULES, jsonStr)
+
+    // flush 才是把本次 put 的改动真正落盘（不 flush 可能只在内存里，重启后丢）
     await pref.flush()
   }
 
+
+  // 从 Preferences 里读出来的是一串 JSON，这里负责“尽量安全地”把它还原成 NotifyRule[]（老数据缺字段也能兜住）
   private safeParseNotifyRules(jsonStr: string): NotifyRule[] {
     try {
+      // 先把 JSON 解析成一个泛对象；后面会逐项做校验/兜底，所以这里不直接信它的结构
       const raw: Object = JSON.parse(jsonStr) as Object
       if (!Array.isArray(raw)) return []
 
+      // raw 确认是数组后，再按数组去处理
       const arr: Object[] = raw as Object[]
       const out: NotifyRule[] = []
 
       for (let i: number = 0; i < arr.length; i++) {
+        // 每个元素理论上都是一个对象：{ id, quoteType, stockCode, ... }
+        // 用 Record<string, Object> 只是为了“能用 key 取值”，并不代表它一定合法
         const item: Record<string, Object> = arr[i] as Record<string, Object>
 
+        // id：用 Number 强转；如果是 '123' 这种字符串也能转成 123
         const id: number = Number(item['id'])
+
+        // stockCode / stockName / conditionText：统一转成字符串并 trim，避免 null/undefined 造成崩溃
         const stockCode: string = String(item['stockCode'] ?? '').trim()
         const stockName: string = String(item['stockName'] ?? '').trim()
         const conditionText: string = String(item['conditionText'] ?? '').trim()
+
+        // enabled：Boolean(...) 会把 0/1、true/false、空字符串等转成布尔值
         const enabled: boolean = Boolean(item['enabled'])
 
-        // ✅ 新增：quoteType（老数据没有就默认 stock）
+        // quoteType：新增字段。老版本存的数据没有 quoteType，这里默认按 stock 处理
+        // 同时做一次白名单：只有 'index' 才当成 index，其它一律按 stock（防脏数据）
         const qtRaw: string = String(item['quoteType'] ?? 'stock').trim()
         const quoteType: QuoteType = (qtRaw === 'index') ? 'index' : 'stock'
 
+        // 最基本的合法性校验：id 必须能转成数字、代码必须 6 位、名称/条件不能为空
+        // 注意：这里不校验 quoteType（上面已经做过白名单兜底了）
         if (!Number.isNaN(id) && stockCode.length === 6 && stockName.length > 0 && conditionText.length > 0) {
+          // 通过校验的才加入输出数组，避免把脏数据带到 UI / RuleEngine
           out.push({
             id: id,
             quoteType: quoteType,
@@ -1672,34 +1800,47 @@ struct HarmonyStockPage {
       }
       return out
     } catch (e) {
+      // JSON 解析失败/结构异常：直接返回空数组，保证页面不会因为坏数据崩
       return []
     }
   }
 
+
+  // 根据当前已有的通知规则，重新计算 nextRuleId（保证新增规则时 id 不会和已有的重复）
   private recomputeNextRuleId(): void {
+    // 从 0 开始扫一遍，找出当前 notifyRules 里最大的 id
     let maxId: number = 0
     for (let i: number = 0; i < this.notifyRules.length; i++) {
+      // 只关心 id 最大值；这里不做复杂校验，因为 notifyRules 本身已经是我们维护的结构
       if (this.notifyRules[i].id > maxId) maxId = this.notifyRules[i].id
     }
+
+    // 下一个可用 id = 当前最大 id + 1（简单、直观，也方便排查问题）
     this.nextRuleId = maxId + 1
   }
 
+  // 从“通知”页的输入框组装一条新规则：校验输入 → 去重 → 补全名称 → 写入 notifyRules 并落盘
   private async addNotifyRuleFromUI(): Promise<void> {
+    // 1) 读取并校验代码：规则引擎/后端接口都按 6 位代码走，长度不对直接拦住
     const code: string = this.ruleStockCodeInput.trim()
     if (code.length !== 6) {
       this.ruleMsg = '请输入 6 位代码'
       return
     }
 
+    // 2) 读取并校验阈值：这里允许用户输入字符串，但最终必须能转成数字
     const v: number = Number(this.rulePriceInput.trim())
     if (Number.isNaN(v)) {
       this.ruleMsg = '请输入正确的价格阈值'
       return
     }
 
-    // 去重：同 code + 同条件 直接不加
+    // 3) 拼出统一的条件文案：后续“去重”和“命中判断”都依赖 conditionText 的一致性
+    //    ruleOpIndex=0 表示 ≥，=1 表示 ≤（你界面上两个按钮就是在改这个）
     const opText: string = (this.ruleOpIndex === 0) ? '≥' : '≤'
     const cond: string = `价格 ${opText} ${v.toFixed(2)}`
+
+    // 4) 去重：同 quoteType + 同 code + 同 cond，视为同一条规则，直接提示不再添加
     for (let i: number = 0; i < this.notifyRules.length; i++) {
       const r: NotifyRule = this.notifyRules[i]
       if (r.quoteType === this.ruleQuoteType && r.stockCode === code && r.conditionText === cond) {
@@ -1708,71 +1849,65 @@ struct HarmonyStockPage {
       }
     }
 
-    // 尽量从缓存/后端拿 name（你的 ensureQuoteCachedForCode 已有）
+    // 5) 尝试把标的名称补全出来：优先通过缓存/后端拿到 name，这样列表里显示更友好
+    //    注意这里按 quoteType 请求，避免“指数/股票同码”时拿错名字
     const qt: QuoteType = this.ruleQuoteType
     await this.ensureQuoteCachedByType(qt, code)
     const q: Quote | null = this.findQuoteInCacheByType(qt, code)
-    const name: string = (q !== null) ? q.name : code
+    const name: string = (q !== null) ? q.name : code  // 拿不到就先用 code 顶上
 
+    // 6) 组装新规则对象：enabled 默认 true，表示添加后立刻生效
     const newRule: NotifyRule = {
       id: this.nextRuleId,
-      quoteType: qt,                 // ✅ 新增
+      quoteType: qt,
       stockCode: code,
       stockName: name,
       conditionText: cond,
       enabled: true
     }
+
+    // 7) 提前把 id 游标加 1：避免并发/重复点击时出现同 id
     this.nextRuleId += 1
 
-    // ✅ 触发 UI：必须 new array
+    // 8) 更新状态：ArkUI 对数组引用敏感，所以这里用“新数组”触发 UI 刷新
     const next: NotifyRule[] = [newRule].concat(this.notifyRules)
     this.notifyRules = next
     this.notifyRulesVer += 1
+
+    // 9) 持久化到 preferences：保证重启后规则还在
     await this.saveNotifyRulesToPrefs()
 
-    // 清空输入
+    // 10) 清空输入并给一个轻提示：让用户知道这次点击生效了
     this.ruleStockCodeInput = ''
     this.rulePriceInput = ''
     this.ruleMsg = '已添加并启用'
   }
 
+  // 删除一条通知规则：按 id 过滤掉目标规则 → 更新列表版本号 → 立刻落盘到 preferences
   private async deleteRule(ruleId: number): Promise<void> {
+    // 用新数组承接结果（不要原地 splice），这样 ArkUI 才能稳定触发刷新
     const next: NotifyRule[] = []
+
+    // 遍历现有规则，把“不是要删的那条”都保留下来
     for (let i: number = 0; i < this.notifyRules.length; i++) {
       const r: NotifyRule = this.notifyRules[i]
-      if (r.id !== ruleId) next.push(r)
+      if (r.id !== ruleId) {
+        next.push(r)
+      }
     }
+
+    // 替换为新数组：通知页面 List 会跟着重绘
     this.notifyRules = next
+
+    // 手动 bump 一下版本号（你用它当 key），确保列表在某些情况下也会强制刷新
     this.notifyRulesVer += 1
+
+    // 保存到本地：避免重启后“删掉的规则又回来了”
     await this.saveNotifyRulesToPrefs()
   }
 
-  private consumeFormIdFromAppStorageV2(from: string): void {
-    // 从 AppStorageV2 里把桌面卡片传进来的 formId 取出来（只取一次，用完就清掉）
-    const st: ActiveFormState | undefined =
-      AppStorageV2.connect(ActiveFormState, APP_STORAGE_KEY_ACTIVE_FORM, () => new ActiveFormState())
 
-    // AppStorage 取不到就直接返回（一般是 key 没注册成功或上下文异常）
-    if (!st) {
-      hilog.error(DOMAIN, TAG, '[%{public}s] AppStorageV2.connect failed', from)
-      return
-    }
 
-    // formId 为空表示这次不是从卡片进来的，或者已经被消费过了
-    const fid: string = st.formId
-    if (fid.length === 0) {
-      hilog.info(DOMAIN, TAG, '[%{public}s] no formId in ActiveFormState', from)
-      return
-    }
-
-    // 保存到页面状态：后续更新桌面卡片时会用到这个 id
-    this.activeFormId = fid
-
-    // 清掉 AppStorage 里的值，避免 onPageShow/onResume 多次触发导致重复消费
-    st.formId = ''
-
-    hilog.info(DOMAIN, TAG, '[%{public}s] ✅ consumed formId=%{public}s -> this.activeFormId', from, fid)
-  }
 
   // ===== 自定义 TabBar：这里就能完全控制文字颜色 =====
   @Builder
