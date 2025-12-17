@@ -2840,9 +2840,11 @@ struct HarmonyStockPage {
       .padding({ left: 12, right: 12, top: 10, bottom: 10 })
       .backgroundColor('#101010')
       .borderRadius(12)
+      .width('100%')
     }
     // 行与行之间留一点间距
     .margin({ bottom: 8 })
+    .width('100%')
   }
 
 
