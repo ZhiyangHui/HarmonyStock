@@ -670,7 +670,6 @@ struct HarmonyStockPage {
   }
 
 
-
   // 选中某一根 K 线
   private onKlineSelected(index: number): void {
     if (index < 0 || index >= this.klinePoints.length) {
@@ -1906,7 +1905,27 @@ struct HarmonyStockPage {
     await this.saveNotifyRulesToPrefs()
   }
 
+  // 切换某张行情卡片的“展开 / 收起”状态（用 Map 记录，每张卡一个 key）
+  private toggleCardExpanded(item: Quote): void {
+    // key 里带上 type，避免指数/股票出现同码时互相覆盖（比如 000001）
+    const key: string = `${item.type}-${item.code}`;
 
+    // 旧状态：Map 里没存过就当作 false（默认收起）
+    const oldVal: boolean = this.cardExpandedMap.get(key) ?? false;
+
+    // 这里不直接改原来的 Map，而是复制一个新的：
+    // ArkUI 的 @State 更容易识别“引用变了”，从而触发相关 UI 重绘
+    const newMap: Map<string, boolean> = new Map<string, boolean>();
+    this.cardExpandedMap.forEach((value: boolean, k: string) => {
+      newMap.set(k, value);
+    });
+
+    // 把这张卡片的状态取反（展开 <-> 收起）
+    newMap.set(key, !oldVal);
+
+    // 替换为新 Map（通过“换引用”让状态更新生效）
+    this.cardExpandedMap = newMap;
+  }
 
 
   // ===== 自定义 TabBar：这里就能完全控制文字颜色 =====
@@ -1923,38 +1942,35 @@ struct HarmonyStockPage {
     .backgroundColor(Color.Black)
   }
 
+  // 页面主入口：上面是标题栏，下面用 Tabs 切三块（市场 / 自选 / 通知）
   build() {
-
     Column() {
-      // 顶部标题栏
+      // 顶部标题栏（logo / 标题 / 右侧按钮之类的都在这里）
       this.buildHeader()
 
-      // ===== Tabs 部分 =====
+      // 三个 Tab：只负责“切页面”，具体内容分别交给 buildXXXTab()
       Tabs({ index: this.currentTabIndex }) {
         TabContent() {
           this.buildMarketTab()
         }
-        .tabBar(this.tabBarBuilder('市场', 0))
+        .tabBar(this.tabBarBuilder('市场', 0)) // 市场行情：指数/股票列表 + K 线
 
         TabContent() {
           this.buildWatchlistTab()
         }
-        .tabBar(this.tabBarBuilder('自选', 1))
+        .tabBar(this.tabBarBuilder('自选', 1)) // 自选分组：分组管理 + 自选列表 + 统计卡
 
         TabContent() {
           this.buildNotificationTab()
         }
-        .tabBar(this.tabBarBuilder('通知', 2))
+        .tabBar(this.tabBarBuilder('通知', 2)) // 通知规则：规则增删改 + 命中后系统通知
       }
-      .barMode(BarMode.Fixed)
+      .barMode(BarMode.Fixed)               // 固定 Tab 栏，不滚动
       .backgroundColor(Color.Black)
-      .divider({
-        strokeWidth: 0.5,
-        color: '#333333'
-      })
+      .divider({ strokeWidth: 0.5, color: '#333333' }) // TabBar 下方那条细分割线
       .onChange((index: number) => {
-        this.currentTabIndex = index;
-
+        // 用户切换 Tab 时，更新当前索引（用于控制当前显示哪一页）
+        this.currentTabIndex = index
       })
     }
     .width('100%')
@@ -1993,81 +2009,92 @@ struct HarmonyStockPage {
       this.buildModeChip('股票', 'stock');
     }.width('100%')
     .justifyContent(FlexAlign.SpaceAround)
-    .height(50)                         // 区域更高，看起来更像大按钮区域
+    .height(50)
   }
 
+  // 市场页顶部的“指数 / 股票”切换按钮（一个 chip 对应一种模式）
   @Builder
   private buildModeChip(label: string, mode: 'index' | 'stock') {
     Text(label)
       .fontSize(16)
+      // 当前模式选中态：文字高亮；未选中则灰色
       .fontColor(this.currentMode === mode ? '#FFFFFF' : '#AAAAAA')
       .padding({ left: 10, right: 10, top: 4, bottom: 4 })
+      // 选中态给更亮的底色，做成“胶囊按钮”效果
       .backgroundColor(this.currentMode === mode ? '#333333' : '#181818')
       .borderRadius(12)
       .onClick(() => {
+        // 点到已经选中的模式就不做任何事，避免重复请求/重复清状态
         if (this.currentMode === mode) {
           return;
         }
+
+        // 切换行情模式（影响：列表接口 type、搜索 type、K 线 type）
         this.currentMode = mode;
 
-        // 切模式时重置状态 + 重新拉数据
+        // 切模式时把“市场页相关状态”全部清掉，避免残留上一个模式的数据
         this.marketQuotes = [];
         this.searchedQuotes = [];
         this.selectedQuoteCode = '';
         this.selectedQuoteName = '';
-        this.selectedQuoteType = mode;
+        this.selectedQuoteType = mode;   // 当前选中标的的类型也跟着切
         this.selectedKlineIndex = -1;
         this.klinePoints = [];
         this.klineGeoms = [];
         this.klineXLabels = [];
         this.klineError = '';
 
+        // 重新拉取该模式下的行情列表
         this.fetchQuotes(mode);
       })
   }
 
 
-  // ====== Tab 1：市场（指数 / 股票 + K 线 + 桌面卡片预览） ======
+  // Tab 1：市场页（指数 / 股票切换 + 行情卡片横滑 + K 线展示）
   @Builder
   private buildMarketTab() {
     Column() {
+      // 顶部模式切换（指数 / 股票两个 chip）
       this.buildModeSwitcher()
 
-      // 顶部：标题 + 模式切换 + 搜索区域
+      // 顶部一行：左侧标题 + 右侧搜索框
       Row() {
+        // 标题跟随 currentMode 变化，提示当前看的是什么列表
         Text(this.currentMode === 'index' ? '指数卡片' : '股票卡片')
           .fontSize(16)
           .fontWeight(FontWeight.Medium)
           .fontColor(Color.White)
           .margin({ left: 16, top: 12, bottom: 4 })
 
+        // 占位把右侧内容顶到最右边
         Blank()
 
+        // 搜索区域：按 6 位代码查单个标的（指数/股票取决于 currentMode）
         this.buildSearchArea();
       }
       .width('100%')
+      // 让标题、搜索框在垂直方向居中对齐（看起来更整齐）
       .alignItems(VerticalAlign.Center)
 
-
-
-      // 行情横向滚动 strip
+      // 行情横向滚动条：展示市场列表 + 搜索结果（可点选切换 K 线）
       this.buildQuoteStrip();
 
-      // K 线卡片
+      // K 线卡片：展示当前选中标的的 K 线（周期切换、点击高亮等）
       this.buildKlineCard();
-
-
-
     }
     .width('100%')
     .height('100%')
     .backgroundColor(Color.Black)
+    // Column 内部内容整体从左对齐（避免默认居中导致布局飘）
     .alignItems(HorizontalAlign.Start)
   }
 
-  // ===== 行情 strip，带加载 / 错误状态 + 可删除卡片 =====
+
+  // 行情横滑 strip：上面优先展示“搜索结果”，后面是“后台实时列表”；
+  // 同时把加载/错误状态也放在这里兜住，避免页面空白。
   @Builder
   private buildQuoteStrip() {
+    // 行情列表请求中：给用户一个明确的加载反馈
     if (this.listLoading) {
       Row() {
         Text('行情加载中…')
@@ -2076,6 +2103,8 @@ struct HarmonyStockPage {
       }
       .width('100%')
       .padding({ left: 16, right: 16, top: 12, bottom: 12 })
+
+      // 行情列表请求失败：展示错误信息（只影响当前模式的 UI）
     } else if (this.listError) {
       Row() {
         Text(`行情加载失败：${this.listError}`)
@@ -2084,30 +2113,41 @@ struct HarmonyStockPage {
       }
       .width('100%')
       .padding({ left: 16, right: 16, top: 12, bottom: 12 })
+
+      // 正常状态：用横向 Scroll + Row 形成“卡片横滑”的效果
     } else {
       Scroll() {
         Row({ space: 12 }) {
-          // 搜索出来的卡片
+
+          // ① 搜索出来的卡片：放最前面，相当于“置顶”，更方便你刚搜完马上点
           ForEach(this.searchedQuotes, (item: Quote) => {
             this.buildQuoteCard(item);
-          }, (item: Quote) => `search-${item.type}-${item.code}`)
+          }, (item: Quote) => `search-${item.type}-${item.code}`) // key：保证同一条数据稳定复用，不乱跳
 
-          // 后台实时卡片
+          // ② 后台实时卡片：市场列表（轮询/刷新得到的）
           ForEach(this.marketQuotes, (item: Quote) => {
             this.buildQuoteCard(item);
-          }, (item: Quote) => `rt-${item.type}-${item.code}`)
+          }, (item: Quote) => `rt-${item.type}-${item.code}`) // key：rt=real-time，避免和 search 的 key 冲突
         }
+        // strip 的左右留白 + 上下内边距，卡片不会贴边
         .padding({ left: 16, right: 16, top: 12, bottom: 12 })
       }
+      // 关键：把 Scroll 设置成横向滚动，才能左右滑卡片
       .scrollable(ScrollDirection.Horizontal)
     }
   }
 
-  // ===== 搜索区域 =====
+
+  // 搜索区：输入 6 位代码 + 点“查询”拉单只行情；
+  // 下方顺带展示查询中的 loading / error，小而完整的一块 UI。
   @Builder
   private buildSearchArea() {
     Column() {
+
+      // 第一行：输入框 + 查询按钮
       Row({ space: 8 }) {
+
+        // 输入框：placeholder 会跟着当前模式切换（指数/股票），避免用户输错类型
         TextInput({
           placeholder: this.currentMode === 'index'
             ? '输入指数代码，例如 000001'
@@ -2118,10 +2158,12 @@ struct HarmonyStockPage {
           .fontSize(14)
           .backgroundColor(Color.White)
           .fontColor(Color.Black)
+          // 用户每次输入变化，就把内容写进 searchCode（统一在 queryQuoteByCode 里校验长度）
           .onChange((value: string) => {
             this.searchCode = value.trim();
           })
 
+        // 查询按钮：触发 queryQuoteByCode（里面会按 currentMode 去查 index 或 stock）
         Button('查询')
           .height(32)
           .onClick(() => {
@@ -2130,16 +2172,20 @@ struct HarmonyStockPage {
       }
       .padding({ left: 16, right: 16, top: 8, bottom: 4 })
 
+      // 第二行：查询状态提示（只在需要时出现）
       if (this.searchLoading) {
         Row() {
+          // 查询中给个轻提示，避免用户以为没点上
           Text('正在查询…')
             .fontSize(12)
             .fontColor('#888888')
         }
         .width('100%')
         .padding({ left: 16, right: 16, bottom: 8 })
+
       } else if (this.searchError) {
         Row() {
+          // 查询失败：把错误信息直接露出来（例如“未找到该代码”“HTTP 500”等）
           Text(`查询失败：${this.searchError}`)
             .fontSize(12)
             .fontColor('#FF7875')
@@ -2150,39 +2196,28 @@ struct HarmonyStockPage {
     }
   }
 
-  private toggleCardExpanded(item: Quote): void {
-    const key: string = `${item.type}-${item.code}`;
-    const oldVal: boolean = this.cardExpandedMap.get(key) ?? false;
 
-    // 复制新 Map（触发 State 更新）
-    const newMap: Map<string, boolean> = new Map<string, boolean>();
-    this.cardExpandedMap.forEach((value: boolean, k: string) => {
-      newMap.set(k, value);
-    });
-
-    newMap.set(key, !oldVal);
-    this.cardExpandedMap = newMap;
-  }
-
-
-
-
-  // ===== 行情卡片（指数 / 股票通用） =====
+  // ===== 行情卡片（指数 / 股票通用）=====
+  // 这张卡做两件事：
+  // 1) 点卡片主体：选中该标的 + 回写桌面卡片（如果是从桌面卡片进来的）+ 拉 K 线
+  // 2) 点右下角 “＋/－”：只切换卡片展开/收起（不切换选中、不拉 K 线）
   @Builder
   private buildQuoteCard(item: Quote) {
     Column() {
       Column() {
-        // ===== 卡片主体：点这里才选中 + 拉 K 线 =====
+        // ===== 卡片主体区域：显示名称/价格/涨跌 =====
         Column() {
           Row() {
+            // 标的名称（指数名 / 股票名）
             Text(item.name)
               .fontSize(12)
               .fontColor('#AAAAAA')
 
+            // 删除按钮：从 strip 里移除这张卡
             Text('✕')
               .fontSize(12)
               .fontColor('#777777')
-              // ✅ 用 TapGesture，避免被 Scroll 手势吞 / 冲突
+              // 用 TapGesture 而不是 onClick：横向 Scroll 时更不容易被滑动手势抢走
               .parallelGesture(
                 TapGesture().onAction(async () => {
                   await this.removeQuoteCard(item.code, item.type)
@@ -2190,28 +2225,34 @@ struct HarmonyStockPage {
               )
           }
           .width('100%')
+          // 两端对齐：左边 name，右边 ✕
           .justifyContent(FlexAlign.SpaceBetween)
+          // 垂直居中：让 name 和 ✕ 看起来在同一水平线上
           .alignItems(VerticalAlign.Center)
 
+          // 当前价：展开时字体更大
           Text(item.price.toFixed(2))
+          // 这里用 Map 里的状态控制“展开/收起”的字号
             .fontSize((this.cardExpandedMap.get(`${item.type}-${item.code}`) ?? false) ? 28 : 20)
             .fontWeight(FontWeight.Bold)
+            // 涨红跌绿（按你全局配色）
             .fontColor(item.change >= 0 ? '#FF4D4F' : '#39D98A')
             .margin({ top: 4 })
 
+          // 涨跌额 + 涨跌幅：展开时字体更大
           Text(`${item.change.toFixed(2)}  ${item.changePercent.toFixed(2)}%`)
             .fontSize((this.cardExpandedMap.get(`${item.type}-${item.code}`) ?? false) ? 16 : 12)
             .fontColor(item.change >= 0 ? '#FF7875' : '#6BE49B')
             .margin({ top: 4 })
         }
 
-        // ===== 右下角 +/-：只负责展开收起 =====
+        // ===== 右下角展开/收起按钮：只改尺寸，不触发选中逻辑 =====
         Row() {
           Blank()
           Text((this.cardExpandedMap.get(`${item.type}-${item.code}`) ?? false) ? '－' : '＋')
             .fontSize(18)
             .fontColor('#CCCCCC')
-            // ✅ 也用 TapGesture，避免和外层点击打架
+            // 同样用 TapGesture，避免和外层“点卡片选中”的 tap 互相影响
             .parallelGesture(
               TapGesture().onAction(() => {
                 this.toggleCardExpanded(item)
@@ -2221,29 +2262,36 @@ struct HarmonyStockPage {
         .width('100%')
         .margin({ top: 8 })
       }
+      // 展开时 padding 更大，看起来“卡片更松”
       .padding((this.cardExpandedMap.get(`${item.type}-${item.code}`) ?? false) ? 20 : 12)
       .backgroundColor('#171717')
       .borderRadius(12)
+      // 展开时卡片更宽
       .width((this.cardExpandedMap.get(`${item.type}-${item.code}`) ?? false) ? 200 : 140)
+      // 展开时给一个固定高度；收起时不写 height，让它按内容自适应
       .height((this.cardExpandedMap.get(`${item.type}-${item.code}`) ?? false) ? 150 : undefined)
 
-      // ✅ 关键：外层卡片用 parallelGesture 捕获 tap，横向 Scroll 下更稳定
+      // ===== 卡片整体的点击：选中 + 回写桌面卡片 + 拉 K 线 =====
+      // 用 parallelGesture 的原因：这张卡是在横向 Scroll 里，普通点击很容易被滚动手势吞掉
       .parallelGesture(
         TapGesture().onAction(async () => {
+          // 这些日志是为了排查：是否点击事件没进来、activeFormId 是否为空等
           console.info(`[TAP] quoteCard tapped code=${item.code} activeFormId=${this.activeFormId}`)
           hilog.error(DOMAIN, TAG, '[TAP] quoteCard tapped code=%{public}s activeFormId=%{public}s',
             item.code, this.activeFormId)
 
+          // 更新“当前选中标的”：K 线和右侧详细展示都靠这几个字段
           this.selectedQuoteCode = item.code
           this.selectedQuoteName = item.name
           this.selectedQuoteType = item.type
           hilog.error(DOMAIN, TAG, '[TAP] selected set type=%{public}s code=%{public}s', item.type, item.code)
 
+          // 如果是从桌面卡片打开的（activeFormId 有值），就把当前选中的标的同步回桌面卡片
           hilog.error(DOMAIN, TAG, '[TAP] before updateWidgetIfLaunchedFromForm')
           await this.updateWidgetIfLaunchedFromForm(item)
           hilog.error(DOMAIN, TAG, '[TAP] after updateWidgetIfLaunchedFromForm')
 
-          // ✅ 你要的“点击切换行情卡片 + 拉K线”
+          // 点击卡片后拉对应周期的 K 线
           const period: string = this.getKlinePeriodParam()
           this.fetchKline(item.type, item.code, period)
         })
@@ -2253,22 +2301,26 @@ struct HarmonyStockPage {
 
 
   // ===== K 线卡片 =====
+  // 用一张卡把 “K线图 + 周期切换 + 当前蜡烛详情” 放在一起：上面是标题/周期，中间是图，下面是 x 轴日期。
   @Builder
   private buildKlineCard() {
     Column() {
-      // 标题 + 周期切换
+      // 标题行：左边显示当前选中的标的名，右边是 日/周/月 切换
       Row({ space: 12 }) {
         Text(
+          // 已经选中过某个行情卡片：优先用选中的名字做标题
           this.selectedQuoteName !== ''
             ? `${this.selectedQuoteName} K 线`
+            // 否则就按当前模式给个默认标题
             : (this.currentMode === 'index' ? '指数 K 线' : '股票 K 线')
         )
           .fontSize(16)
           .fontWeight(FontWeight.Medium)
           .fontColor(Color.White)
 
-        Blank()
+        Blank() // 把右侧的周期按钮顶到最右
 
+        // 周期按钮：内部会切换 klinePeriodIndex 并触发重新拉取
         this.buildKlinePeriodChip('日K', 0)
         this.buildKlinePeriodChip('周K', 1)
         this.buildKlinePeriodChip('月K', 2)
@@ -2276,13 +2328,14 @@ struct HarmonyStockPage {
       .width('100%')
       .padding({ left: 16, right: 16, top: 8 })
 
-      // 当前选中 K 线的详细信息条
+      // 当前选中的那根蜡烛的详情条（点某根 K 线后才会出现）
       if (this.selectedKlineIndex >= 0) {
         Row({ space: 8 }) {
-          Text(this.selectedKlineDate)
+          Text(this.selectedKlineDate) // 日期
             .fontSize(10)
             .fontColor('#CCCCCC')
 
+          // OHLC：开/高/低/收
           Text(`开 ${this.selectedKlineOpen.toFixed(2)}`)
             .fontSize(10)
             .fontColor('#AAAAAA')
@@ -2303,7 +2356,7 @@ struct HarmonyStockPage {
         .padding({ left: 16, right: 16, top: 4, bottom: 4 })
       }
 
-      // 主体区域
+      // 主体内容：根据加载/错误/空数据/正常数据四种状态切换展示
       Column() {
         if (this.klineLoading) {
           Text('K 线加载中…')
@@ -2318,9 +2371,10 @@ struct HarmonyStockPage {
             .fontSize(12)
             .fontColor('#666666')
         } else {
+          // 有数据：左侧是 y 轴刻度，右侧是可横向滚动的蜡烛图 + x 轴标签
           Column() {
             Row() {
-              // y 轴刻度
+              // y 轴刻度：简单放 3 个（最大/中间/最小），用 SpaceBetween 撑开
               Column() {
                 Text(this.klineMaxPrice.toFixed(0))
                   .fontSize(10)
@@ -2338,46 +2392,54 @@ struct HarmonyStockPage {
               .height(this.KLINE_PLOT_H)
               .justifyContent(FlexAlign.SpaceBetween)
 
-              // 右侧：K 线 + x 轴一起横向滚动
+              // 右侧图表：因为 K 线数量多，所以把“蜡烛区域 + x轴日期”一起放进横向 Scroll
               Scroll() {
                 Column() {
-                  // 蜡烛图区域
+                  // 蜡烛图区域：每根蜡烛用 KlineGeom 里预先算好的 topGap / wick / body 来拼出来
                   Row({ space: this.candleGap }) {
                     ForEach(this.klineGeoms, (g: KlineGeom, idx: number) => {
                       Column() {
+                        // 顶部空白：把蜡烛整体“压”到正确的 y 位置
                         Blank().height(g.topGap)
 
-                        Rect()      // 上影线
+                        // 上影线
+                        Rect()
                           .width(2)
                           .height(g.upperWick)
                           .fill('#444444')
 
-                        Rect()      // 实体
+                        // 实体：涨跌用不同颜色（注意：这里的 isUp 定义是 close >= open）
+                        Rect()
                           .width(this.candleBodyWidth)
                           .height(g.bodyHeight)
                           .fill(g.isUp ? '#39D98A' : '#FF4D4F')
 
-                        Rect()      // 下影线
+                        // 下影线
+                        Rect()
                           .width(2)
                           .height(g.lowerWick)
                           .fill('#444444')
 
                         Blank().height(4)
                       }
+                      // 高亮当前选中的蜡烛：用边框做一个轻量的“选中框”
                       .border({
                         width: this.selectedKlineIndex === idx ? 1 : 0,
                         color: this.selectedKlineIndex === idx ? '#FACC15' : '#000000'
                       })
+                      // 点某根蜡烛：更新 selectedKlineIndex 和详情条展示的数据
                       .parallelGesture(
                         TapGesture().onAction(() => {
                           this.onKlineSelected(idx)
-                        }))
+                        })
+                      )
                     }, (g: KlineGeom, idx: number) => `${idx}`)
                   }
+                  // 总宽度 = 蜡烛数量 * (实体宽 + 间距) 之类的逻辑（你在 getKlineTotalWidth() 里算）
                   .width(this.getKlineTotalWidth())
                   .height(this.KLINE_PLOT_H)
 
-                  // x 轴日期标签
+                  // x 轴日期标签：用 SpaceBetween 把少量标签均匀铺开
                   if (this.klineXLabels.length > 0) {
                     Row() {
                       ForEach(this.klineXLabels, (label: string, idx: number) => {
@@ -2391,9 +2453,11 @@ struct HarmonyStockPage {
                     .margin({ bottom: 10 })
                   }
                 }
+                // 右侧留一点边距，避免最后一根蜡烛贴边不好点
                 .padding({ right: 32 })
               }
               .scrollable(ScrollDirection.Horizontal)
+              // 图 + x轴一起滚，所以高度是 plot + label
               .height(this.KLINE_PLOT_H + this.KLINE_LABEL_H)
               .margin({ left: 8 })
             }
@@ -2401,6 +2465,7 @@ struct HarmonyStockPage {
           }
         }
       }
+      // 卡片整体的固定高度：给内容留出空间（图 + x轴 + 标题/详情条的余量）
       .width('100%')
       .height(this.KLINE_PLOT_H + this.KLINE_LABEL_H + 70)
       .margin({ top: 8, bottom: 12 })
@@ -2410,98 +2475,47 @@ struct HarmonyStockPage {
     }
   }
 
+  // K 线周期切换按钮：点“日/周/月”时，更新 klinePeriodIndex，并按当前选中的标的重新拉一次 K 线
   @Builder
   private buildKlinePeriodChip(label: string, index: number) {
     Text(label)
       .fontSize(12)
+      // 选中态高亮：当前周期 == 这个 chip 的 index
       .fontColor(this.klinePeriodIndex === index ? '#FFFFFF' : '#AAAAAA')
       .padding({ left: 10, right: 10, top: 4, bottom: 4 })
       .backgroundColor(this.klinePeriodIndex === index ? '#333333' : '#181818')
       .borderRadius(12)
       .onClick(() => {
+        // 点到同一个周期就不做事，避免重复请求 + 无意义刷新
         if (this.klinePeriodIndex === index) {
           return;
         }
+
+        // 先更新周期索引（getKlinePeriodParam() 会根据它返回 day/week/month）
         this.klinePeriodIndex = index;
 
+        // 只有“已经选中过某个行情卡片”才拉 K 线
+        // （没选中的话 selectedQuoteCode 为空，拉了也不知道拉谁）
         if (this.selectedQuoteCode !== '') {
           const period: string = this.getKlinePeriodParam();
+          // 用当前选中的类型 + 代码重新拉一份 K 线数据
           this.fetchKline(this.selectedQuoteType, this.selectedQuoteCode, period);
         }
       })
   }
 
 
-  @Builder
-  private buildDesktopCardSmall() {
-    Column() {
-      Text('自选股（小号卡片）')
-        .fontSize(10)
-        .fontColor('#999999')
-        .margin({ bottom: 4 })
-
-      Text('300750 宁德时代')
-        .fontSize(12)
-        .fontColor(Color.White)
-
-      Text('210.35  -1.25  -0.59%')
-        .fontSize(11)
-        .fontColor('#39D98A')
-        .margin({ top: 4 })
-    }
-    .padding(10)
-    .backgroundColor('#151515')
-    .borderRadius(14)
-    .width(140)
-  }
-
-  @Builder
-  private buildDesktopCardLarge() {
-    Column() {
-      Row() {
-        Text('大盘指数')
-          .fontSize(12)
-          .fontColor('#BBBBBB')
-        Blank()
-        Text('上证')
-          .fontSize(11)
-          .fontColor('#888888')
-      }
-
-      Text('3050.32')
-        .fontSize(20)
-        .fontWeight(FontWeight.Bold)
-        .fontColor('#FF4D4F')
-        .margin({ top: 4 })
-
-      Text('+12.34  +0.41%')
-        .fontSize(11)
-        .fontColor('#FF7875')
-        .margin({ top: 2 })
-
-      Row({ space: 2 }) {
-        ForEach([16, 10, 18, 8, 20, 12, 14], (h: number, idx: number) => {
-          Rect()
-            .width(6)
-            .height(h)
-            .fill('#333333')
-        }, (h: number, idx: number) => `${idx}-${h}`)
-      }
-      .margin({ top: 8 })
-    }
-    .padding(12)
-    .backgroundColor('#151515')
-    .borderRadius(14)
-    .width(180)
-  }
-
-  // ====== Tab 2：自选（分组管理 + 组内列表） ======
+  // Tab 2（自选）：分组管理 + 当前分组的股票列表（依赖 activeGroupId / activeStocks / quoteCache 来驱动 UI）
   @Builder
   private buildWatchlistTab() {
     Column() {
+      // 顶部：分组横向条（切换分组、删除分组等一般都在这里做）
       this.buildGroupStrip()
+
+      // 新建分组输入栏
       this.buildCreateGroupBar()
 
+      // 页面级提示信息（比如“已添加 xx 只”“已删除 xx 只”之类）
       if (this.watchlistMsg.length > 0) {
         Text(this.watchlistMsg)
           .fontSize(10)
@@ -2509,6 +2523,7 @@ struct HarmonyStockPage {
           .margin({ left: 16, bottom: 8 })
       }
 
+      // 没有任何分组时的空态
       if (this.activeGroupId < 0 || this.groups.length === 0) {
         Text('暂无分组，请先创建一个分组')
           .fontSize(12)
@@ -2517,30 +2532,33 @@ struct HarmonyStockPage {
           .width('100%')
           .textAlign(TextAlign.Center)
       } else {
-        // 组头（无参 Builder：直接用 activeGroupName + activeGroupId）
+        // 当前分组标题区（直接读 activeGroupId 对应的 group 信息）
         this.buildActiveGroupHeaderCurrent()
 
-        // 统计（无参 Builder：用 activeGroupXXXText）
+        // 当前分组统计卡（股票数 / 涨跌数 / 平均涨跌幅，依赖 quoteCache）
         this.buildGroupStatsCard()
 
-        // 添加条
+        // 组内添加股票输入栏
         this.buildAddStockBar()
 
+        // 当前分组没有股票时的空态
         if (this.getActiveGroupStocksList().length === 0) {
           Text('该分组暂无股票，请在下方输入代码添加')
             .fontSize(12)
             .fontColor('#666666')
             .margin({ top: 12, left: 16 })
         } else {
+          // 组内股票列表：用 activeStocks（从 activeGroup.stocks slice 出来的“新数组”）
           List() {
             ForEach(this.activeStocks, (s: StockRef) => {
               this.buildStockRefRow(this.activeGroupId, s)
             }, (s: StockRef) => {
-              // key 只需要稳定唯一即可，不要把 ver 放这里也行
+              // 行级 key：保证同一分组内 code 唯一即可
               return `${this.activeGroupId}-${s.code}`
             })
           }
-          .key(`${this.activeGroupId}-${this.activeStocksVer}`)  // ✅关键：让 List 重新创建
+          // List 级 key：activeStocksVer 变化时强制 List 重建，解决“数组内容变了但列表不刷新”的情况
+          .key(`${this.activeGroupId}-${this.activeStocksVer}`)
           .padding({ left: 16, right: 16, top: 8, bottom: 12 })
         }
       }
@@ -2548,12 +2566,16 @@ struct HarmonyStockPage {
     .width('100%')
     .height('100%')
     .backgroundColor(Color.Black)
+    // 页面级 key：把几个关键版本号都带上，保证分组切换/行情更新/统计刷新时，这个 Tab 的关键区域能稳定重绘
     .key(`watchlist-${this.activeGroupId}-${this.activeStocksVer}-${this.quoteCacheVer}-${this.activeStatsVer}`)
   }
 
+
+  // 当前分组的“标题行”：左侧显示分组名，右侧提供“删除分组”入口（直接操作 activeGroupId）
   @Builder
   private buildActiveGroupHeaderCurrent() {
     Row({ space: 8 }) {
+      // 分组名称：从 activeGroupId 对应的 group 里取 name（空时返回 ''）
       Text(this.getActiveGroupNameText())
         .fontSize(14)
         .fontColor('#FFFFFF')
@@ -2561,6 +2583,7 @@ struct HarmonyStockPage {
 
       Blank()
 
+      // 删除按钮：删除当前 activeGroupId 对应的分组，并触发 active 链路同步（你在 deleteGroup 里已经做了）
       Text('删除分组')
         .fontSize(12)
         .fontColor('#FF7875')
@@ -2576,43 +2599,58 @@ struct HarmonyStockPage {
   }
 
 
+  // 分组横向滚动条：展示所有分组，并允许点击切换当前 active 分组
   @Builder
   private buildGroupStrip() {
     Scroll() {
       Row({ space: 8 }) {
         ForEach(this.groups, (group: StockGroup) => {
           Column({ space: 2 }) {
+            // 分组名称
             Text(group.name)
               .fontSize(12)
+              // 当前选中的分组高亮显示
               .fontColor(this.activeGroupId === group.id ? '#FFFFFF' : '#DDDDDD')
 
+            // 分组平均涨跌幅（来自缓存行情的统计结果）
             Text(this.getGroupAvgPctText(group.id))
               .fontSize(10)
               .fontColor(this.getGroupAvgPctColor(group.id))
           }
+          // 每个分组 chip 的整体样式
           .padding({ left: 12, right: 12, top: 6, bottom: 6 })
           .backgroundColor(this.activeGroupId === group.id ? '#2A2A2A' : '#161616')
           .borderRadius(12)
           .onClick(async () => {
+            // 点击切换当前分组
             this.activeGroupId = group.id
 
+            // 先同步一次 activeStocks，保证列表立即切换
             this.syncActiveStocks()
+
+            // 预热该分组下所有股票的行情（补齐缓存）
             await this.preloadActiveGroupQuotes()
+
+            // 行情回来后再同步一次，确保统计和列表都用到最新数据
             this.syncActiveStocks()
           })
         }, (group: StockGroup) => group.id.toString())
       }
       .padding({ left: 16, right: 16, top: 12, bottom: 8 })
     }
+    // 横向滚动，用来容纳较多分组
     .scrollable(ScrollDirection.Horizontal)
   }
 
+
+  // 新建分组输入栏：输入分组名并创建一个新的自选分组
   @Builder
   private buildCreateGroupBar() {
     Row({ space: 8 }) {
+      // 分组名输入框（受控输入，值直接绑定到 newGroupName）
       TextInput({
         placeholder: '新建分组名（如 科技股）',
-        text: this.newGroupName // ✅ 受控：UI 绑定 state
+        text: this.newGroupName
       })
         .width('68%')
         .height(32)
@@ -2620,74 +2658,77 @@ struct HarmonyStockPage {
         .backgroundColor(Color.White)
         .fontColor(Color.Black)
         .onChange((v: string) => {
+          // 实时更新 state，后面点击“创建”时直接用
           this.newGroupName = v.trim();
         })
 
+      // 创建按钮：校验输入并调用 createGroup
       Button('创建')
         .height(32)
         .onClick(async () => {
           const name: string = this.newGroupName.trim();
           if (name.length === 0) {
+            // 简单的输入校验提示
             this.watchlistMsg = '请输入分组名';
             return;
           }
-          await this.createGroup(name);
 
+          // 真正创建分组（内部会更新 groups / activeGroupId / 持久化）
+          await this.createGroup(name);
         })
     }
     .padding({ left: 16, right: 16, bottom: 8 })
   }
 
 
-  @Builder
-  private buildActiveGroupHeader(g: StockGroup) {
-    Row({ space: 8 }) {
-      Text(g.name)
-        .fontSize(14)
-        .fontColor('#FFFFFF')
-        .fontWeight(FontWeight.Medium)
-
-      Blank()
-
-      Text('删除分组')
-        .fontSize(12)
-        .fontColor('#FF7875')
-        .padding({ left: 10, right: 10, top: 6, bottom: 6 })
-        .backgroundColor('#1A1A1A')
-        .borderRadius(10)
-        .onClick(() => {
-          this.deleteGroup(g.id)
-        })
-    }
-    .width('100%')
-    .padding({ left: 16, right: 16, top: 8, bottom: 6 })
-  }
-
-
-
+  // 分组统计卡：展示当前 active 分组的整体情况（股票数 / 上涨 / 下跌 / 平均涨跌幅）
   @Builder
   private buildGroupStatsCard() {
     Column() {
       Row({ space: 12 }) {
 
+        // 股票总数
         Column({ space: 4 }) {
-          Text('股票数').fontSize(10).fontColor('#777777')
-          Text(this.activeStatStockCount).fontSize(14).fontColor('#FFFFFF').fontWeight(FontWeight.Medium)
+          Text('股票数')
+            .fontSize(10)
+            .fontColor('#777777')
+          Text(this.activeStatStockCount)
+            .fontSize(14)
+            .fontColor('#FFFFFF')
+            .fontWeight(FontWeight.Medium)
         }.width('22%')
 
+        // 上涨数量
         Column({ space: 4 }) {
-          Text('上涨').fontSize(10).fontColor('#777777')
-          Text(this.activeStatUp).fontSize(14).fontColor('#FFFFFF').fontWeight(FontWeight.Medium)
+          Text('上涨')
+            .fontSize(10)
+            .fontColor('#777777')
+          Text(this.activeStatUp)
+            .fontSize(14)
+            .fontColor('#FFFFFF')
+            .fontWeight(FontWeight.Medium)
         }.width('22%')
 
+        // 下跌数量
         Column({ space: 4 }) {
-          Text('下跌').fontSize(10).fontColor('#777777')
-          Text(this.activeStatDown).fontSize(14).fontColor('#FFFFFF').fontWeight(FontWeight.Medium)
+          Text('下跌')
+            .fontSize(10)
+            .fontColor('#777777')
+          Text(this.activeStatDown)
+            .fontSize(14)
+            .fontColor('#FFFFFF')
+            .fontWeight(FontWeight.Medium)
         }.width('22%')
 
+        // 平均涨跌幅（可能是 '--'，表示当前还没有有效行情）
         Column({ space: 4 }) {
-          Text('均涨跌').fontSize(10).fontColor('#777777')
-          Text(this.activeStatAvgPct).fontSize(14).fontColor('#FFFFFF').fontWeight(FontWeight.Medium)
+          Text('均涨跌')
+            .fontSize(10)
+            .fontColor('#777777')
+          Text(this.activeStatAvgPct)
+            .fontSize(14)
+            .fontColor('#FFFFFF')
+            .fontWeight(FontWeight.Medium)
         }.width('22%')
       }
       .width('100%')
@@ -2696,14 +2737,15 @@ struct HarmonyStockPage {
       .backgroundColor('#101010')
       .borderRadius(14)
     }
-    // 这个 key 你保留即可
+    // key 里带上分组 / 行情 / 统计版本号，确保相关数据变化时这张统计卡会重新渲染
     .key(`stats-${this.activeGroupId}-${this.activeStocksVer}-${this.quoteCacheVer}-${this.activeStatsVer}`)
   }
 
-
+  // 添加股票输入栏：向当前 active 分组里追加股票代码
   @Builder
   private buildAddStockBar() {
     Row({ space: 8 }) {
+      // 股票代码输入框（受控输入，绑定 addStockCodeInput）
       TextInput({
         placeholder: '输入 6 位股票代码（如 300750）',
         text: this.addStockCodeInput
@@ -2714,62 +2756,75 @@ struct HarmonyStockPage {
         .backgroundColor(Color.White)
         .fontColor(Color.Black)
         .onChange((v: string) => {
+          // 实时同步输入值，点击“添加”时直接使用
           this.addStockCodeInput = v.trim();
         })
 
+      // 添加按钮：校验输入并把股票加到当前分组
       Button('添加')
         .height(32)
         .onClick(async () => {
           const code: string = this.addStockCodeInput.trim();
+
+          // 基本校验：必须是 6 位代码
           if (code.length !== 6) {
             this.watchlistMsg = '请输入 6 位代码';
             return;
           }
 
-          // ✅ 关键：永远取“当前 activeGroupId”，不再依赖 Builder 参数闭包
+          // 永远以当前 activeGroupId 为准，避免 Builder 闭包里拿到旧值
           const gid: number = this.activeGroupId;
           if (gid < 0) {
             this.watchlistMsg = '当前没有可用分组';
             return;
           }
 
+          // 调用分组逻辑添加股票（内部会去重、持久化、刷新统计）
           await this.addStocksToGroup(gid, [code]);
+
+          // 简单的操作反馈提示
           this.watchlistMsg = `已尝试添加：${code} -> group=${gid}`;
         })
     }
     .padding({ left: 16, right: 16, bottom: 8 })
   }
 
-
-
+  // 自选列表中的单行股票项：展示名称 / 代码 / 行情信息，并提供删除入口
   @Builder
   private buildStockRefRow(groupId: number, s: StockRef) {
     ListItem() {
       Row() {
+        // 左侧：股票名称 + 代码
         Column({ space: 4 }) {
+          // 名称优先从行情缓存里取，兜底用 StockRef 里的 name / 占位符
           Text(this.getStockRowName(s))
             .fontSize(14)
             .fontColor(Color.White)
 
+          // 股票代码（始终显示）
           Text(s.code)
             .fontSize(11)
             .fontColor('#666666')
         }
 
-        Blank()
+        Blank() // 撑开左右两列
 
+        // 右侧：价格 + 涨跌信息（右对齐，更像行情列表）
         Column({ space: 4 }) {
+          // 当前价格，颜色按涨跌区分
           Text(this.getStockRowPriceText(s))
             .fontSize(14)
             .fontColor(this.getStockRowPriceColor(s))
             .textAlign(TextAlign.End)
 
+          // 涨跌额 + 涨跌幅（次要信息，用浅一点的颜色）
           Text(this.getStockRowChangeText(s) + '  ' + this.getStockRowPctText(s))
             .fontSize(11)
             .fontColor(this.getStockRowSubColor(s))
             .textAlign(TextAlign.End)
         }
 
+        // 删除按钮：把当前股票从该分组中移除
         Button('✕')
           .height(28)
           .width(28)
@@ -2778,7 +2833,7 @@ struct HarmonyStockPage {
           .fontColor('#777777')
           .borderRadius(14)
           .onClick(() => {
-            // 只做删除，不要 async，避免手势链路更复杂
+            // 这里只做同步删除调用，不用 async，避免手势链路变复杂
             this.removeStocksFromGroup(groupId, [s.code])
           })
       }
@@ -2786,66 +2841,33 @@ struct HarmonyStockPage {
       .backgroundColor('#101010')
       .borderRadius(12)
     }
+    // 行与行之间留一点间距
     .margin({ bottom: 8 })
   }
 
 
-  @Builder
-  private buildWatchlistRow(s: StockQuote) {
-    ListItem() {
-      Row() {
-        Column({ space: 4 }) {
-          Text(s.name)
-            .fontSize(14)
-            .fontColor(Color.White)
-
-          Text(s.code)
-            .fontSize(11)
-            .fontColor('#666666')
-        }
-
-        Blank()
-
-        Column({ space: 4 }) {
-          Text(s.price.toFixed(2))
-            .fontSize(14)
-            .fontColor(s.change >= 0 ? '#FF4D4F' : '#39D98A')
-            .textAlign(TextAlign.End)
-
-          Text(`${s.change.toFixed(2)}  ${s.changePercent.toFixed(2)}%`)
-            .fontSize(11)
-            .fontColor(s.change >= 0 ? '#FF7875' : '#6BE49B')
-            .textAlign(TextAlign.End)
-        }
-      }
-      .padding({ left: 16, right: 16, top: 10, bottom: 10 })
-      .backgroundColor('#101010')
-    }
-    .margin({ bottom: 1 })
-  }
-
-  // ====== Tab 3：行情通知中心（只是 UI 列表） ======
+  // ====== Tab 3：行情通知中心（只负责“规则的增删展示”，真正的触发在 RuleEngine） ======
   @Builder
   private buildNotificationTab() {
     Column() {
+      // 顶部标题栏：这里只做标题展示，不放复杂交互
       Row() {
         Text('通知规则').fontSize(14).fontColor(Color.White)
       }
       .width('100%')
       .padding({ left: 16, right: 16, top: 12, bottom: 8 })
 
-      // ✅ 新增规则区
+      // 新增规则区：把“类型 + 代码 + 条件 + 添加按钮”集中放在一起
       Column({ space: 8 }) {
-        Column({space:8}){
+        Column({ space: 8 }) {
+          // 规则类型：股票 / 指数（二选一，影响 placeholder 和后端查询 type）
           Row({ space: 6 }) {
             this.buildRuleTypeChip('股票', 'stock')
             this.buildRuleTypeChip('指数', 'index')
           }
+
           Row({ space: 8 }) {
-            // ✅ 类型选择：股票 / 指数
-
-
-            // ✅ 代码输入
+            // 代码输入：6 位；placeholder 会跟随当前 ruleQuoteType 切换
             TextInput({
               placeholder: this.ruleQuoteType === 'stock' ? '股票代码(6位)' : '指数代码(6位)',
               text: this.ruleStockCodeInput
@@ -2855,9 +2877,10 @@ struct HarmonyStockPage {
               .fontSize(13)
               .backgroundColor(Color.White)
               .fontColor(Color.Black)
+              // 输入时把两边空格去掉，避免“看着一样其实多了空格”导致校验失败
               .onChange((v: string) => { this.ruleStockCodeInput = v.trim() })
 
-            // ✅ 操作符
+            // 操作符选择：用两个按钮（≥ / ≤），避免 Picker 的手势冲突和类型麻烦
             Row({ space: 6 }) {
               Text('≥')
                 .fontSize(12)
@@ -2876,7 +2899,7 @@ struct HarmonyStockPage {
                 .onClick(() => { this.ruleOpIndex = 1 })
             }
 
-            // ✅ 阈值
+            // 阈值输入：比如 12.34；最终会拼进 conditionText（"价格 ≥ xx.xx"）
             TextInput({ placeholder: '阈值', text: this.rulePriceInput })
               .width('18%')
               .height(32)
@@ -2885,14 +2908,14 @@ struct HarmonyStockPage {
               .fontColor(Color.Black)
               .onChange((v: string) => { this.rulePriceInput = v.trim() })
 
-            // ✅ 添加
+            // 添加按钮：真正的校验 / 去重 / 写入 prefs 都在 addNotifyRuleFromUI 里做
             Button('添加')
               .height(32)
               .onClick(async () => { await this.addNotifyRuleFromUI() })
           }
         }
 
-
+        // UI 提示：比如“请输入 6 位代码 / 已添加并启用”
         if (this.ruleMsg.length > 0) {
           Text(this.ruleMsg)
             .fontSize(10)
@@ -2901,12 +2924,13 @@ struct HarmonyStockPage {
       }
       .padding({ left: 16, right: 16, bottom: 10 })
 
-      // ✅ 规则列表
+      // 规则列表：只是把 notifyRules 渲染成可操作的行（启用/删除等）
       List() {
         ForEach(this.notifyRules, (rule: NotifyRule) => {
           this.buildNotifyRuleItem(rule)
         }, (rule: NotifyRule) => rule.id.toString())
       }
+      // 用版本号做 key：确保增删规则后 List 能重新创建，避免偶发不刷新
       .key(`notifyRules-${this.notifyRulesVer}`)
     }
     .width('100%')
@@ -2914,13 +2938,15 @@ struct HarmonyStockPage {
     .backgroundColor(Color.Black)
   }
 
+
+  // 单条通知规则的列表行：展示“类型 + 名称/代码 + 条件”，并提供删除入口
   @Builder
   private buildNotifyRuleItem(rule: NotifyRule) {
     ListItem() {
       Row({ space: 10 }) {
         Column({ space: 4 }) {
           Row({ space: 6 }) {
-            // ✅ 类型标识
+            // 类型小标签：让用户一眼能区分这条规则是股票还是指数
             Text(rule.quoteType === 'stock' ? '股票' : '指数')
               .fontSize(10)
               .fontColor('#AAAAAA')
@@ -2928,17 +2954,20 @@ struct HarmonyStockPage {
               .backgroundColor('#1A1A1A')
               .borderRadius(6)
 
+            // 主标题：标的名称 + 代码（跟行情卡片的展示习惯保持一致）
             Text(`${rule.stockName}（${rule.stockCode}）`)
               .fontSize(13)
               .fontColor(Color.White)
           }
 
+          // 条件文本：直接复用你保存的 conditionText（例如 “价格 ≥ 12.34”）
           Text(rule.conditionText)
             .fontSize(11)
             .fontColor('#BBBBBB')
         }
-        .layoutWeight(1)
+        .layoutWeight(1) // 左侧信息区占满剩余空间，把“删除”按钮顶到右边
 
+        // 删除按钮：只负责触发删除逻辑，具体持久化在 deleteRule 里做
         Button('删除')
           .height(28)
           .padding({ left: 10, right: 10 })
@@ -2952,17 +2981,25 @@ struct HarmonyStockPage {
       .padding({ left: 16, right: 16, top: 10, bottom: 10 })
       .backgroundColor('#101010')
     }
-    .margin({ bottom: 1 })
+    .margin({ bottom: 1 }) // 行与行之间留一点缝，视觉上更像“列表”
   }
 
+
+  // 规则类型选择按钮：用于在“股票 / 指数”之间切换当前要创建的通知规则类型
   @Builder
   private buildRuleTypeChip(label: string, t: 'index' | 'stock') {
     Text(label)
       .fontSize(12)
+      // 当前选中的类型高亮显示，其余置灰
       .fontColor(this.ruleQuoteType === t ? '#FFFFFF' : '#AAAAAA')
       .padding({ left: 10, right: 10, top: 6, bottom: 6 })
       .backgroundColor(this.ruleQuoteType === t ? '#333333' : '#181818')
       .borderRadius(10)
-      .onClick(() => { this.ruleQuoteType = t })
+      .onClick(() => {
+        // 点击后直接切换当前规则的 quoteType
+        // 后续输入框 placeholder、查询类型都会随之变化
+        this.ruleQuoteType = t
+      })
   }
+
 }
