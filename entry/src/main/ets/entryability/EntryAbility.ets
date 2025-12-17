@@ -11,22 +11,32 @@ const TAG: string = 'HarmonyStock';
 
 
 export default class EntryAbility extends UIAbility {
+  // Ability 创建时调用（冷启动 / 重新拉起都会走这里）
   onCreate(want: Want, launchParam: AbilityConstant.LaunchParam): void {
     try {
-      this.context.getApplicationContext().setColorMode(ConfigurationConstant.ColorMode.COLOR_MODE_NOT_SET);
+      // 强制不跟随系统深浅色模式，交给应用自己控制主题
+      this.context
+        .getApplicationContext()
+        .setColorMode(ConfigurationConstant.ColorMode.COLOR_MODE_NOT_SET)
     } catch (err) {
-      hilog.error(DOMAIN, TAG, 'Failed to set colorMode. Cause: %{public}s', JSON.stringify(err));
+      // 设置失败不影响主流程，打日志即可
+      hilog.error(
+        DOMAIN,
+        TAG,
+        'Failed to set colorMode. Cause: %{public}s',
+        JSON.stringify(err)
+      )
     }
-    hilog.info(DOMAIN, TAG, '%{public}s', 'Ability onCreate');
 
-    // ✅ 冷启动：从 want 里取 formId，写入 AppStorageV2 全局对象
-    this.consumeFormIdIntoGlobalState(want, 'onCreate');
+    hilog.info(DOMAIN, TAG, '%{public}s', 'Ability onCreate')
+
+    // 冷启动场景：
+    // 如果是从桌面卡片（Form）点击进入，会在 want 里带 formId
+    // 这里统一取出来，写入 AppStorageV2，供页面层消费
+    this.consumeFormIdIntoGlobalState(want, 'onCreate')
   }
 
-  /**
-   * ✅ 热启动：当应用已在前台/后台，再次从桌面卡片点击进入，会走这里
-   * 你日志里已经有 OnNewWant / onNewWant，因此这里必须也处理一次
-   */
+
   onNewWant(want: Want, launchParam: AbilityConstant.LaunchParam): void {
     hilog.info(DOMAIN, TAG, '%{public}s', 'Ability onNewWant');
     this.consumeFormIdIntoGlobalState(want, 'onNewWant');
@@ -60,62 +70,54 @@ export default class EntryAbility extends UIAbility {
     hilog.info(DOMAIN, TAG, '%{public}s', 'Ability onBackground');
   }
 
-  // =========================================================
-  // ✅ 核心：把桌面卡片 router 传入的 formId 写入 AppStorageV2
-  // =========================================================
+  // 把桌面卡片（Form）通过 router/want 带进来的 formId 存到 AppStorageV2，给页面侧 onPageShow 去“消费”
   private consumeFormIdIntoGlobalState(want: Want, from: string): void {
-    const formId = this.readStringParamFromWant(want, ROUTER_KEY_FORM_ID)
+    // 从 want 里读出 formId（桌面卡片跳转时由 router 传入）
+    const formId: string = this.readStringParamFromWant(want, ROUTER_KEY_FORM_ID)
     if (formId.length === 0) {
+      // 没有 formId：说明这次不是从桌面卡片进来的，直接忽略
       return
     }
 
-    const st = AppStorageV2.connect(
+    // 拿到全局状态对象（没有就按默认构造创建），用于跨 Ability / Page 传递 formId
+    const st: ActiveFormState | undefined = AppStorageV2.connect(
       ActiveFormState,
       APP_STORAGE_KEY_ACTIVE_FORM,
       () => new ActiveFormState()
     )
 
     if (st !== undefined) {
+      // 写入全局：页面侧会在 onPageShow 里读出来，然后清空，避免重复触发
       st.formId = formId
       hilog.info(DOMAIN, TAG, '[%{public}s] saved formId=%{public}s into AppStorageV2', from, formId)
     } else {
+      // connect 失败一般是 key 未注册 / 上下文异常，打日志方便定位
       hilog.error(DOMAIN, TAG, 'AppStorageV2.connect failed')
     }
   }
 
 
-  private getOrCreateActiveFormState(): ActiveFormState | null {
-    const st: ActiveFormState | undefined =
-      AppStorageV2.connect(
-        ActiveFormState,
-        APP_STORAGE_KEY_ACTIVE_FORM,
-        () => new ActiveFormState()
-      )
-
-    if (!st) {
-      hilog.error(DOMAIN, TAG, 'AppStorageV2.connect failed in Ability')
-      return null
-    }
-    return st
-  }
-
-  // =========================================================
-  // ✅ 工具函数：从 want.parameters 里安全读 string（无 any / unknown）
-  // =========================================================
+  // 从 want.parameters 里安全读取一个字符串参数（不存在 / 非 string 都返回空串）
   private readStringParamFromWant(want: Want, key: string): string {
+    // 没有 parameters，直接返回空
     if (!want.parameters) {
       return '';
     }
 
+    // parameters 在 ArkTS 里是一个弱类型对象，这里统一当成 Record 来读
     const params: Record<string, Object> = want.parameters as Record<string, Object>;
     const v: Object | undefined = params[key];
 
+    // key 不存在或值为空
     if (v === undefined || v === null) {
       return '';
     }
+
+    // 只接受 string，其它类型一律丢弃，避免类型污染
     if (typeof v === 'string') {
       return (v as string).trim();
     }
+
     return '';
   }
 }

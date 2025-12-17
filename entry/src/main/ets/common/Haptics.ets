@@ -8,7 +8,7 @@ const TAG: string = 'HAPTIC'
 
 export class Haptics {
   static async vibrateShort(): Promise<void> {
-    // ✅ 日志 1：明确“振动方法被调用”
+    // 日志 1：明确“振动方法被调用”
     hilog.info(DOMAIN, TAG, 'vibrateShort() called')
 
     try {
@@ -18,13 +18,13 @@ export class Haptics {
           { id: 0, usage: 'unknown' },
           (error: BusinessError) => {
             if (error) {
-              // ✅ 日志 2：振动 API 返回错误（模拟器一般不会报错）
+              // 日志 2：振动 API 返回错误（模拟器一般不会报错）
               hilog.error(DOMAIN, TAG,
                 'startVibration callback error: %{public}s',
                 JSON.stringify(error)
               )
             } else {
-              // ✅ 日志 3：振动 API 已正常执行
+              // 日志 3：振动 API 已正常执行
               hilog.info(DOMAIN, TAG, 'startVibration callback ok')
             }
             resolve()
@@ -32,7 +32,7 @@ export class Haptics {
         )
       })
     } catch (e) {
-      // ✅ 日志 4：极端异常兜底
+      // 日志 4：极端异常兜底
       hilog.error(DOMAIN, TAG,
         'vibrateShort exception: %{public}s',
         JSON.stringify(e)
