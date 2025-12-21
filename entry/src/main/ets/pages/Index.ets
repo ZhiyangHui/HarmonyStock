@@ -3,7 +3,13 @@ import preferences from '@ohos.data.preferences';
 import { formBindingData, formProvider } from '@kit.FormKit';
 import { AppStorageV2 } from '@kit.ArkUI'
 import { hilog } from '@kit.PerformanceAnalysisKit'
-import { ActiveFormState, APP_STORAGE_KEY_ACTIVE_FORM } from '../common/ActiveFormatState'
+import {
+  ActiveFormState,
+  APP_STORAGE_KEY_ACTIVE_FORM,
+  ActiveQuoteNavState,
+  APP_STORAGE_KEY_QUOTE_NAV
+} from '../common/ActiveFormatState'
+
 
 import notificationManager from '@ohos.notificationManager'
 import notification from '@ohos.notification'
@@ -143,6 +149,7 @@ struct HarmonyStockPage {
   // 行情卡片数据：实时列表 + 搜索结果（都显示在同一个横向 strip 里）
   @State marketQuotes: Quote[] = []       // 后端批量返回的实时卡片
   @State searchedQuotes: Quote[] = []     // 查询出来的卡片（置顶、去重）
+  @State stripQuotes: Quote[] = []
 
   // 当前选中的标的（决定 K 线展示的是谁，也用于桌面卡片回写）
   @State selectedQuoteCode: string = ''   // 6 位代码
@@ -229,21 +236,49 @@ struct HarmonyStockPage {
   // 通知规则列表版本号（每次增删/切换 enabled 都 ++，用来刷新 List）
   @State notifyRulesVer: number = 0
 
+  // 承接一次来自通知的行情跳转参数，消费完成后会被清空
+  private pendingNavCode: string = ''
+
+  // 记录待跳转的目标类型，用于区分指数或个股
+  private pendingNavType: string = ''           // 'index' | 'stock'（暂用 string，避免类型收紧影响编译）
+
+  // 记录待跳转时希望展示的 K 线周期
+  private pendingNavPeriod: string = ''         // 'day' | 'week' | 'month'
+
+  // 定时检查或延迟执行通知跳转时使用的定时器 id
+  private quoteNavTimerId: number = -1
+
   onPageShow() {
-    // 页面回到前台时触发：先拿到桌面卡片传来的 formId，再（如果有选中的标的）顺手把当前行情回写到卡片
-    hilog.error(0x0000, 'INDEX_DEBUG', '🔥 Index onPageShow CALLED')
+    // 页面重新回到前台时触发，用于处理卡片或通知带来的状态同步
+    hilog.error(0x0000, 'INDEX_DEBUG', ' Index onPageShow CALLED')
 
-    // 从 AppStorageV2 消费 formId（用于后续更新桌面卡片）
-    this.consumeFormIdFromAppStorageV2('onPageShow')
+    // 从 AppStorage 中拉取尚未消费的通知跳转参数到本地 pending 变量
+    this.pumpPendingFromStorage('onPageShow')
 
-    // 如果是从卡片打开的，并且当前已经选中了一只标的：同步更新卡片展示
+    // 打印当前待处理的通知跳转 code，便于确认是否成功接收到
+    hilog.info(DOMAIN, TAG, '[Index] page show pending code=%{public}s', this.pendingNavCode)
+
+    // 打印完整的待跳转参数，辅助排查类型或周期不一致的问题
+    hilog.info(
+      DOMAIN,
+      TAG,
+      'pendingNav code=%{public}s type=%{public}s period=%{public}s',
+      this.pendingNavCode,
+      this.pendingNavType,
+      this.pendingNavPeriod
+    )
+
+    // 如果是通过桌面卡片进入页面，并且当前已有选中的标的
     if (this.activeFormId.length > 0 && this.selectedQuoteCode.length > 0) {
+      // 从本地缓存中查找当前选中的行情数据
       const q: Quote | null = this.findQuoteInCaches(this.selectedQuoteCode)
       if (q !== null) {
+        // 将当前行情状态回写到桌面卡片，保持卡片与页面展示一致
         this.updateWidgetIfLaunchedFromForm(q)
       }
     }
   }
+
 
   // ===== 自选 / 通知假数据（保持原样） =====
   @State groups: StockGroup[] = [
@@ -320,6 +355,17 @@ struct HarmonyStockPage {
     // 页面即将显示：打个调试点，方便看生命周期是否正常走到这
     this.dbg('aboutToAppear:enter')
 
+    // 页面即将出现时先主动拉取一次，避免冷启动时错过通知跳转参数
+    this.pumpPendingFromStorage('aboutToAppear')
+
+    // 再通过定时轮询兜底，覆盖前台 onNewWant 但未触发 onPageShow 的情况
+    if (this.quoteNavTimerId < 0) {
+      this.quoteNavTimerId = setInterval(() => {
+        // 周期性检查是否有新的通知跳转写入 AppStorage
+        this.pumpPendingFromStorage('interval')
+      }, 200) as number
+    }
+
     // 先把本地持久化的数据恢复出来（分组/规则/自选预热/拉行情）
     // 这里用 then 是为了确保顺序：分组 -> 规则 -> 预热 -> 拉列表
     this.loadGroupsFromPrefs().then(async () => {
@@ -352,7 +398,13 @@ struct HarmonyStockPage {
   }
 
   aboutToDisappear(): void {
-    // 页面离开时停止轮询，避免后台一直跑（省电/省流量，也避免重复通知）
+    // 页面即将离开时，停止用于承接通知跳转的轮询定时器
+    if (this.quoteNavTimerId >= 0) {
+      clearInterval(this.quoteNavTimerId)
+      this.quoteNavTimerId = -1               // 重置定时器 id，标记当前未在轮询
+    }
+
+    // 页面不在前台时停止规则引擎，避免后台持续运行带来额外消耗
     RuleEngine.stop()
   }
 
@@ -839,13 +891,69 @@ struct HarmonyStockPage {
   }
 
 
-  // 把当前的分组列表（this.groups）序列化成 JSON，并写入 Preferences，保证下次启动还能恢复分组数据
-  private async saveGroupsToPrefs(): Promise<void> {
-    const pref = await preferences.getPreferences(getContext(this), this.PREF_FILE);
-    const jsonStr: string = JSON.stringify(this.groups);
-    await pref.put(this.PREF_KEY_GROUPS, jsonStr);
-    await pref.flush();
+  private dedupeStockRefs(list: StockRef[]): StockRef[] {
+    // 用于记录已经出现过的股票代码，避免重复加入
+    const seen: Set<string> = new Set<string>()
+
+    // 去重后的结果列表，保持原有顺序
+    const out: StockRef[] = []
+
+    // 按原顺序遍历输入列表，确保稳定性
+    for (let i: number = 0; i < list.length; i++) {
+      // 统一清理 code 的首尾空格，避免因脏数据导致误判
+      const code: string = list[i].code.trim()
+
+      // 非 6 位代码直接忽略，兜底过滤异常数据
+      if (code.length !== 6) continue
+
+      // 已处理过的 code 不再重复加入
+      if (seen.has(code)) continue
+
+      // 记录该 code 已出现
+      seen.add(code)
+
+      // 保留原 StockRef 对象，避免丢失其他字段信息
+      out.push(list[i])
+    }
+
+    // 返回去重后的股票引用列表
+    return out
   }
+
+  private async saveGroupsToPrefs(): Promise<void> {
+    // 落盘前统一清洗 groups，防止历史重复数据持续写入本地
+    const cleaned: StockGroup[] = []
+
+    // 对每个分组逐一处理，确保每组 stocks 都是干净的
+    for (let i: number = 0; i < this.groups.length; i++) {
+      const g: StockGroup = this.groups[i]
+
+      // 构造新的分组对象，仅对 stocks 做去重处理
+      cleaned.push({
+        id: g.id,
+        name: g.name,
+        createdAt: g.createdAt,
+        version: g.version,
+        stocks: this.dedupeStockRefs(g.stocks)
+      })
+    }
+
+    // 用清洗后的结果整体替换内存中的 groups
+    this.groups = cleaned
+
+    // 获取偏好设置实例，用于持久化分组数据
+    const pref = await preferences.getPreferences(getContext(this), this.PREF_FILE)
+
+    // 将分组数据序列化为 JSON 字符串保存
+    const jsonStr: string = JSON.stringify(this.groups)
+
+    // 写入分组数据到本地偏好存储
+    await pref.put(this.PREF_KEY_GROUPS, jsonStr)
+
+    // 强制刷盘，确保数据真正落到存储介质
+    await pref.flush()
+  }
+
 
   // 从 Preferences 里读出来的 JSON 字符串还原成 StockGroup[]，顺便做一次结构兜底（防止老数据/脏数据把页面搞崩）
   private safeParseGroups(jsonStr: string): StockGroup[] {
@@ -872,24 +980,29 @@ struct HarmonyStockPage {
 
         // stocks 可能不存在/不是数组：统一兜底成空数组
         const stocksRaw: Object = item['stocks'] ?? [];
-        const stocks: StockRef[] = [];
+        const stocks: StockRef[] = []
+        const seenCodes: Set<string> = new Set<string>()
 
         if (Array.isArray(stocksRaw)) {
-          const sr: Object[] = stocksRaw as Object[];
+          const sr: Object[] = stocksRaw as Object[]
           for (let j: number = 0; j < sr.length; j++) {
-            const s: Record<string, Object> = sr[j] as Record<string, Object>;
+            const s: Record<string, Object> = sr[j] as Record<string, Object>
 
-            // 只接受 6 位 code；name 可选，有就带上
-            const code: string = String(s['code'] ?? '').trim();
-            if (code.length === 6) {
-              const ref: StockRef = { code: code };
+            const code: string = String(s['code'] ?? '').trim()
+            if (code.length !== 6) continue
 
-              const nm: string = String(s['name'] ?? '').trim();
-              if (nm.length > 0) {
-                ref.name = nm;
-              }
-              stocks.push(ref);
+            // 去重：同一分组里同 code 只保留一条
+            if (seenCodes.has(code)) continue
+            seenCodes.add(code)
+
+            const ref: StockRef = { code: code }
+
+            const nm: string = String(s['name'] ?? '').trim()
+            if (nm.length > 0) {
+              ref.name = nm
             }
+
+            stocks.push(ref)
           }
         }
 
@@ -1688,6 +1801,260 @@ struct HarmonyStockPage {
     hilog.info(DOMAIN, TAG, '[%{public}s] consumed formId=%{public}s', from, fid)
   }
 
+  // 从 AppStorageV2 中消费一次通知跳转参数，读取后写入本地 pending 并立即清空全局状态
+  private consumeQuoteNavFromAppStorageV2(from: string): void {
+    // 连接通知跳转对应的全局状态对象
+    const st: ActiveQuoteNavState | undefined =
+      AppStorageV2.connect(ActiveQuoteNavState, APP_STORAGE_KEY_QUOTE_NAV, () => new ActiveQuoteNavState())
+
+    // 全局状态连接失败时直接返回，避免后续空指针
+    if (!st) {
+      hilog.error(DOMAIN, TAG, '[%{public}s] AppStorageV2.connect quoteNav failed', from)
+      return
+    }
+
+    // 通过 version 判断是否存在尚未处理的新跳转请求
+    if (st.version <= 0 || st.targetCode.length === 0) {
+      hilog.info(DOMAIN, TAG, '[%{public}s] no quoteNav in ActiveQuoteNavState', from)
+      return
+    }
+
+    // 将全局状态中的跳转参数拷贝到页面本地的 pending 变量
+    this.pendingNavCode = st.targetCode
+    this.pendingNavType = st.targetType
+    this.pendingNavPeriod = st.klinePeriod
+
+    // 全局状态用完即清空，防止页面生命周期重复触发同一次跳转
+    st.targetCode = ''
+    st.targetType = ''
+    st.klinePeriod = ''
+    st.version = 0
+
+    // 打印已成功消费的通知跳转参数，便于排查执行链路
+    hilog.info(
+      DOMAIN,
+      TAG,
+      '[%{public}s] consumed quoteNav code=%{public}s type=%{public}s period=%{public}s',
+      from,
+      this.pendingNavCode,
+      this.pendingNavType,
+      this.pendingNavPeriod
+    )
+  }
+
+
+  // 在切换行情模式后调用，用于清理 searchedQuotes，只保留当前模式下的唯一标的
+  private normalizeSearchedQuotesForMode(mode: 'index' | 'stock'): void {
+    // 存放筛选并去重后的搜索结果
+    const out: Quote[] = []
+
+    // 记录已经出现过的 type+code，用于去重
+    const seen: Set<string> = new Set<string>()
+
+    // 按原顺序遍历已有的搜索结果
+    for (let i: number = 0; i < this.searchedQuotes.length; i++) {
+      const q: Quote = this.searchedQuotes[i]
+
+      // 丢弃不属于当前模式的结果
+      if (q.type !== mode) {
+        continue
+      }
+
+      // 使用 type+code 作为唯一键，避免同一标的重复出现
+      const k: string = `${q.type}-${q.code}`
+      if (seen.has(k)) {
+        continue
+      }
+
+      // 标记该标的已处理
+      seen.add(k)
+
+      // 保留首个出现的结果，维持列表稳定性
+      out.push(q)
+    }
+
+    // 用整理后的结果整体替换原有搜索列表
+    this.searchedQuotes = out
+  }
+
+  // 执行一次来自通知的行情跳转：切换模式、确保标的存在、选中并加载对应 K 线
+  private async applyPendingQuoteNav(from: string): Promise<void> {
+    // 没有待处理的跳转参数时直接返回
+    if (this.pendingNavCode.length === 0) {
+      return
+    }
+
+    // 本地拷贝 pending 参数，避免后续流程被中途修改
+    const code: string = this.pendingNavCode
+    const typeStr: string = this.pendingNavType
+    const periodStr: string = this.pendingNavPeriod
+
+    // 提前清空 pending，防止流程异常导致重复执行
+    this.pendingNavCode = ''
+    this.pendingNavType = ''
+    this.pendingNavPeriod = ''
+
+    // 校验代码格式，统一按 6 位处理，异常直接丢弃
+    if (code.length !== 6) {
+      hilog.error(DOMAIN, TAG, '[%{public}s] invalid nav code=%{public}s', from, code)
+      return
+    }
+
+    // 将字符串类型收敛为内部使用的行情类型
+    const qType: 'index' | 'stock' = (typeStr === 'stock') ? 'stock' : 'index'
+
+    // 将通知携带的周期参数映射为内部的 K 线周期索引
+    if (periodStr === 'week') {
+      this.klinePeriodIndex = 1
+    } else if (periodStr === 'month') {
+      this.klinePeriodIndex = 2
+    } else {
+      this.klinePeriodIndex = 0
+    }
+
+    // 切换到市场页并同步更新当前行情模式
+    this.currentTabIndex = 0
+    this.currentMode = qType
+
+    // 收敛搜索结果列表，避免切模式后残留其他类型的数据
+    this.normalizeSearchedQuotesForMode(this.currentMode)
+
+    // 清空旧行情列表并重新拉取当前模式下的行情数据
+    this.listError = ''
+    this.listLoading = true
+    this.marketQuotes = []
+    await this.fetchQuotes(this.currentMode).catch(() => {})
+
+    // 确保目标标的已存在于缓存或列表中，不存在则主动拉取并加入
+    const q: Quote | null = await this.ensureQuoteInStripAndCache(qType, code)
+    if (q === null) {
+      hilog.error(
+        DOMAIN,
+        TAG,
+        '[%{public}s] ensureQuote failed type=%{public}s code=%{public}s',
+        from,
+        qType,
+        code
+      )
+      return
+    }
+
+    // 将目标标的设为当前选中项，驱动右侧行情与 K 线联动
+    this.selectedQuoteCode = q.code
+    this.selectedQuoteName = q.name
+    this.selectedQuoteType = q.type
+
+    // 根据当前周期参数请求对应的 K 线数据
+    const period: string = this.getKlinePeriodParam()
+    this.fetchKline(q.type, q.code, period)
+
+    // 打印最终生效的通知跳转结果，便于追踪完整执行链路
+    hilog.info(
+      DOMAIN,
+      TAG,
+      '[%{public}s] applied nav to type=%{public}s code=%{public}s',
+      from,
+      qType,
+      code
+    )
+  }
+
+  // 确保指定 code 的行情在缓存和搜索条中可用，不存在则通过后端接口拉取并补齐
+  private async ensureQuoteInStripAndCache(type: 'index' | 'stock', code: string): Promise<Quote | null> {
+    // 使用 type+code 作为缓存键，保证指数与股票不冲突
+    const key: string = `${type}-${code}`
+
+    // 先从本地缓存中查找，命中即可直接复用
+    const cached: Quote | undefined = this.quoteCache.get(key)
+    if (cached) {
+      // 确保该标的在搜索条中可见，避免只在缓存中但 UI 不显示
+      this.pinQuoteToSearchStrip(cached)
+      return cached
+    }
+
+    // 缓存未命中时，通过后端 by_code 接口拉取单条行情
+    const httpRequest = http.createHttp()
+    try {
+      // 按类型和 code 精确请求后端行情数据
+      const url: string = `http://101.43.185.73:8000/api/quote/by_code?type=${type}&code=${code}`
+      const res = await httpRequest.request(url, {
+        method: http.RequestMethod.GET,
+        connectTimeout: this.HTTP_CONNECT_TIMEOUT,
+        readTimeout: this.HTTP_READ_TIMEOUT
+      })
+
+      // 请求失败或无有效返回时直接放弃
+      if (res.responseCode !== 200 || !res.result) {
+        return null
+      }
+
+      // 将后端返回的结构解析并映射为前端 Quote 对象
+      const backendItem: BackendQuote = JSON.parse(res.result as string) as BackendQuote
+      const newItem: Quote = this.mapBackendQuote(backendItem, type)
+
+      // 将新行情合并进本地缓存，供后续直接复用
+      this.mergeQuotesToCache([newItem])
+
+      // 将新行情置顶加入搜索条，并自动去重
+      this.pinQuoteToSearchStrip(newItem)
+
+      return newItem
+    } catch (e) {
+      // 请求或解析异常时返回 null，由上层决定兜底策略
+      return null
+    } finally {
+      // 无论成功与否都释放 httpRequest，避免资源泄漏
+      httpRequest.destroy()
+    }
+  }
+
+  // 将指定 Quote 置顶插入 searchedQuotes，并按 code+type 去重
+  private pinQuoteToSearchStrip(q: Quote): void {
+    // 新列表以目标 Quote 作为首项，确保在搜索条中优先展示
+    const next: Quote[] = [q]
+
+    // 依次拷贝原有搜索结果，跳过与目标重复的项
+    for (let i: number = 0; i < this.searchedQuotes.length; i++) {
+      const it: Quote = this.searchedQuotes[i]
+      if (it.code === q.code && it.type === q.type) {
+        continue
+      }
+      next.push(it)
+    }
+
+    // 用整理后的结果整体替换搜索条数据
+    this.searchedQuotes = next
+  }
+
+  // 判断指定 Quote 是否已经存在于 searchedQuotes 中（按 type + code 精确匹配）
+  private existsInSearchedQuotes(q: Quote): boolean {
+    // 顺序遍历当前搜索结果列表
+    for (let i: number = 0; i < this.searchedQuotes.length; i++) {
+      const s: Quote = this.searchedQuotes[i]
+
+      // 当类型和代码同时一致时，认为该标的已存在
+      if (s.type === q.type && s.code === q.code) {
+        return true
+      }
+    }
+
+    // 遍历结束仍未命中，说明搜索结果中不存在该标的
+    return false
+  }
+
+  // 从 AppStorageV2 拉取并消费所有可能的待处理跳转或卡片状态
+  private pumpPendingFromStorage(from: string): void {
+    // 消费桌面卡片带来的 formId，用于后续卡片联动
+    this.consumeFormIdFromAppStorageV2(from)
+
+    // 消费通知跳转参数，并写入本地 pending 变量
+    this.consumeQuoteNavFromAppStorageV2(from)
+
+    // 执行一次 pending 跳转逻辑，真正驱动页面状态变化
+    this.applyPendingQuoteNav(from).catch(() => {})
+  }
+
+
   // 确保系统通知权限/开关已打开：没开就引导用户去系统界面打开，最后返回是否可用
   private async ensureNotificationEnabled(): Promise<boolean> {
     try {
@@ -2118,24 +2485,29 @@ struct HarmonyStockPage {
     } else {
       Scroll() {
         Row({ space: 12 }) {
+          // ① searched：照常画
+          ForEach(
+            this.searchedQuotes,
+            (item: Quote) => { this.buildQuoteCard(item) },
+            (item: Quote) => `q-${item.type}-${item.code}`   // ⭐ 建议统一 key 前缀
+          )
 
-          // ① 搜索出来的卡片：放最前面，相当于“置顶”，更方便你刚搜完马上点
-          ForEach(this.searchedQuotes, (item: Quote) => {
-            this.buildQuoteCard(item);
-          }, (item: Quote) => `search-${item.type}-${item.code}`) // key：保证同一条数据稳定复用，不乱跳
-
-          // ② 后台实时卡片：市场列表（轮询/刷新得到的）
-          ForEach(this.marketQuotes, (item: Quote) => {
-            this.buildQuoteCard(item);
-          }, (item: Quote) => `rt-${item.type}-${item.code}`) // key：rt=real-time，避免和 search 的 key 冲突
+          // ② market：如果这条已经在 searched 里出现过，就不画
+          ForEach(
+            this.marketQuotes,
+            (item: Quote) => {
+              if (!this.existsInSearchedQuotes(item)) {
+                this.buildQuoteCard(item)
+              }
+            },
+            (item: Quote) => `q-${item.type}-${item.code}`   // ⭐ 同码同类型用同一个 key
+          )
         }
-        // strip 的左右留白 + 上下内边距，卡片不会贴边
         .padding({ left: 16, right: 16, top: 12, bottom: 12 })
       }
-      // 关键：把 Scroll 设置成横向滚动，才能左右滑卡片
       .scrollable(ScrollDirection.Horizontal)
     }
-  }
+    }
 
 
   // 搜索区：输入 6 位代码 + 点“查询”拉单只行情；
@@ -2180,7 +2552,7 @@ struct HarmonyStockPage {
             .fontSize(12)
             .fontColor('#888888')
         }
-        .width('100%')
+        .width('50%')
         .padding({ left: 16, right: 16, bottom: 8 })
 
       } else if (this.searchError) {

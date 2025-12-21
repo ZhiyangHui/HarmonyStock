@@ -228,7 +228,12 @@ export class RuleEngine {
       }
 
       // 触发系统通知（内部会确保通知权限开启）
-      await NotifyCenter.publish(p)
+      await NotifyCenter.publish(p, {
+        targetCode: r.stockCode,
+        targetType: r.quoteType,      // 'stock' | 'index'
+        klinePeriod: 'day',           // 你也可以按你当前 UI 默认：'day'
+        ensureInWatchlist: false      // 直接 false
+      })
 
       // 这条日志才是真正意义上的“命中并已通知”
       hilog.info(DOMAIN, TAG, 'rule hit id=%{public}d code=%{public}s', r.id, r.stockCode)

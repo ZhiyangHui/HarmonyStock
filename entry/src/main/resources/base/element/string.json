@@ -14,11 +14,11 @@
     },
     {
       "name": "widget_desc",
-      "value": "This is a service widget."
+      "value": "实时查询股票/指数行情"
     },
     {
       "name": "widget_display_name",
-      "value": "widget"
+      "value": "指数/股票行情卡片"
     },
     {
       "name": "permission_notification_reason",

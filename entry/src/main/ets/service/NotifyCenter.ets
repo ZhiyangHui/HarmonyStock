@@ -1,121 +1,144 @@
 import notificationManager from '@ohos.notificationManager'
 import notification from '@ohos.notification'
+import wantAgent from '@ohos.wantAgent'
 import { hilog } from '@kit.PerformanceAnalysisKit'
 import { Haptics } from '../common/Haptics'
-import wantAgent from '@ohos.wantAgent'  // 用 WantAgent 绑定“点击通知后跳转”的动作（ArkTS 6 可用）
+import { Want } from '@kit.AbilityKit'
 
-// hilog 的 domain/tag：用于日志分类过滤（domain 常量一般随模块固定，tag 用模块名）
-const DOMAIN: number = 0x0000
-const TAG: string = 'HarmonyStock.Notify'
+const DOMAIN: number = 0x0000                     // hilog 使用的日志域
+const TAG: string = 'HarmonyStock.Notify'         // 通知模块统一使用的日志 TAG
 
-// 通知触发时需要的最小信息：通知文案 + 点击后要打开哪个 Ability
+// 触发一条行情通知所需的最小信息集合
 export interface QuoteAlertPayload {
-  id: number                 // 通知 id（同 id 会覆盖更新）
-  title: string              // 通知标题
-  text: string               // 主文案（行情命中描述）
-  additionalText: string     // 次要文案（例如“打开应用查看详情”）
-  bundleName: string         // 目标应用包名（一般就是本应用包名）
-  abilityName: string        // 目标 Ability（例如 EntryAbility）
+  id: number                                     // 通知唯一 id，用于覆盖或更新
+  title: string                                  // 通知标题
+  text: string                                   // 通知主文案
+  additionalText: string                         // 通知副文案
+  bundleName: string                             // 目标应用 bundleName
+  abilityName: string                            // 点击通知后要拉起的 Ability
 }
 
-// 统一错误结构：这里只用 code 做日志打印，避免 any/unknown
+// 通知点击后用于跳转行情页面的参数
+export interface QuoteNavPayload {
+  targetCode: string                             // 股票或指数代码
+  targetType: string                             // 类型标识：stock / index
+  klinePeriod: string                            // 默认展示的 K 线周期
+  ensureInWatchlist: boolean                     // 是否确保加入自选
+}
+
+// 统一错误结构，仅用于日志打印 code
 interface ErrorObject {
   code: string
 }
 
-// WantAgent wants 里每一项描述“要打开哪个应用的哪个 Ability”
-interface WantAgentRequest {
-  bundleName: string
-  abilityName: string
+// 用 class 承载 want.parameters，避免 ArkTS 对 Object literal 的限制
+// 字段名需与 EntryAbility 中 QuoteNavParams 完全一致
+class QuoteNavParams {
+  targetCode: string = ''                        // 跳转目标代码
+  targetType: string = ''                        // 跳转目标类型
+  klinePeriod: string = ''                       // K 线周期
+  ensureInWatchlist: boolean = true              // 是否自动加入自选
+
+  // 将业务侧的 payload 映射为 want.parameters 可用结构
+  constructor(nav: QuoteNavPayload) {
+    this.targetCode = nav.targetCode
+    this.targetType = nav.targetType
+    this.klinePeriod = nav.klinePeriod
+    this.ensureInWatchlist = nav.ensureInWatchlist
+  }
 }
 
-// WantAgent 的配置：给 notificationManager.publish 用的
+// wantAgent.getWantAgent 所需的配置结构
+// 这里避免使用 SDK 中未导出的 WantAgentInfo 类型
 interface WantAgentConfig {
-  wants: Array<WantAgentRequest>         // 这里必须是数组：WantAgent API 设计如此
-  operationType: wantAgent.OperationType // START_ABILITY 等
-  requestCode: number                    // 用通知 id 当 requestCode，便于一一对应
-  wantAgentFlags: Array<wantAgent.WantAgentFlags> // UPDATE_PRESENT_FLAG 等
+  wants: Array<Want>                             // 点击通知后要执行的 want 列表
+  operationType: wantAgent.OperationType         // wantAgent 执行类型
+  requestCode: number                            // 请求码，用于区分不同 agent
+  wantAgentFlags: Array<wantAgent.WantAgentFlags>// wantAgent 行为标志
 }
 
 export class NotifyCenter {
-  // 确保系统通知权限已开启；未开启时会拉起系统授权页面
+  // 确保系统通知权限已开启，必要时主动拉起授权弹窗
   static async ensureEnabled(): Promise<boolean> {
     try {
-      // 先直接检查当前通知是否可用
       const enabled: boolean = await notificationManager.isNotificationEnabled()
-      if (enabled) {
-        return true
-      }
-
-      // 未开启则请求系统弹出“开启通知”的设置界面
+      if (enabled) return true
       await notificationManager.requestEnableNotification()
-
-      // 用户操作后再检查一次结果
       return await notificationManager.isNotificationEnabled()
     } catch (e) {
-      // 任意异常都视为不可用，避免影响后续逻辑
+      // 权限检测或请求异常时记录日志
       hilog.error(DOMAIN, TAG, 'ensureEnabled err=%{public}s', JSON.stringify(e))
       return false
     }
   }
 
-  // 发布一条行情通知：点击后可跳转回应用，并附带震动反馈
-  static async publish(p: QuoteAlertPayload): Promise<void> {
-    // 确保通知权限已开启（未开启会拉起系统授权页）
+  // 发布一条行情通知，可选携带点击跳转参数
+  static async publish(p: QuoteAlertPayload, nav?: QuoteNavPayload): Promise<void> {
     const ok = await NotifyCenter.ensureEnabled()
-    if (!ok) return
+    if (!ok) return                               // 未获得通知权限时直接返回
+
+    // 打印 nav 参数，确认通知是否携带跳转信息
+    hilog.info(DOMAIN, TAG, 'publish nav=%{public}s', nav ? JSON.stringify(nav) : 'undefined')
 
     try {
-      // 构造 WantAgent：用于通知被点击时跳转回指定 Ability
-      const wantAgentInfo: WantAgentConfig = {
-        wants: [{
-          bundleName: p.bundleName,     // 目标应用包名
-          abilityName: p.abilityName,   // 打开的 Ability
-        }],
-        operationType: wantAgent.OperationType.START_ABILITY,
-        requestCode: p.id,
-        wantAgentFlags: [
-          wantAgent.WantAgentFlags.UPDATE_PRESENT_FLAG
-        ],
+      // 有跳转参数时将其封装为 QuoteNavParams
+      const paramsObj: QuoteNavParams | undefined = nav ? new QuoteNavParams(nav) : undefined
+
+      // 构造用于 wantAgent 的 Want 对象
+      const w: Want = {
+        bundleName: p.bundleName,                 // 目标应用包名
+        abilityName: p.abilityName,               // 目标 Ability
+        moduleName: 'entry',                      // 固定使用 entry 模块
+        parameters: paramsObj
+          ? ((paramsObj as Object) as Record<string, Object>)
+          : undefined                              // 无跳转参数时不传 parameters
       }
 
-      // 获取 WantAgent 实例
+      // 使用时间戳生成 requestCode，避免 wantAgent 复用旧参数
+      const requestCode: number = Number(Date.now() % 2147483647)
+
+      // wantAgent 的配置对象
+      const wantAgentInfo: WantAgentConfig = {
+        wants: [w],
+        operationType: wantAgent.OperationType.START_ABILITY,
+        requestCode: requestCode,
+        wantAgentFlags: [wantAgent.WantAgentFlags.UPDATE_PRESENT_FLAG]
+      }
+
+      // 获取 wantAgent 实例，用于绑定到通知点击事件
       const agent = await wantAgent.getWantAgent(wantAgentInfo)
 
-      // 构造通知请求
+      // 构造系统通知请求
       const req: notificationManager.NotificationRequest = {
-        id: p.id,
+        id: p.id,                                 // 通知 id
         slotType: notification.SlotType.SOCIAL_COMMUNICATION,
         content: {
-          notificationContentType:
-          notificationManager.ContentType.NOTIFICATION_CONTENT_BASIC_TEXT,
+          notificationContentType: notificationManager.ContentType.NOTIFICATION_CONTENT_BASIC_TEXT,
           normal: {
             title: p.title,
             text: p.text,
-            additionalText: p.additionalText,
-          },
+            additionalText: p.additionalText
+          }
         },
-        wantAgent: agent, // 绑定点击行为
+        wantAgent: agent                          // 通知点击后执行的动作
       }
 
-      // 发布系统通知
+      // 发布通知
       await notificationManager.publish(req)
-      hilog.info(DOMAIN, TAG, 'publish ok id=%{public}d', req.id)
+      hilog.info(DOMAIN, TAG, 'publish ok id=%{public}d requestCode=%{public}d', req.id, requestCode)
 
-      // 成功后给一次轻震动反馈
+      // 发布成功后触发一次短震动反馈
       await Haptics.vibrateShort()
     } catch (e) {
-      // 捕获并记录通知发布失败的错误
-      const errObj = e as ErrorObject
-      const codeNum = Number(errObj.code)
+      // 捕获并记录通知发布过程中的异常
+      const errObj: ErrorObject = e as ErrorObject
       hilog.error(
         DOMAIN,
         TAG,
-        'publish failed code=%{public}d err=%{public}s',
-        codeNum,
-        JSON.stringify(e),
+        'publish failed code=%{public}s err=%{public}s',
+        errObj.code,
+        JSON.stringify(e)
       )
     }
   }
-
 }
